@@ -267,3 +267,82 @@ describe('/api/summarize — upstream failures', () => {
     expect(await r.json()).toMatchObject({ summary: 'A tidy summary.' });
   });
 });
+
+/**
+ * FORK: thinking-model support. Gemini 3.x flash (and peers) enable reasoning by
+ * default and bill thinking tokens as OUTPUT — and, critically, count them
+ * against `max_tokens`, which is a COMBINED budget rather than an answer budget.
+ * With the bare answer caps above, a medium thinking pass eats the whole budget
+ * and the completion comes back empty. The route must therefore (a) leave the
+ * caps alone for non-thinking models, (b) add headroom when reasoning is on, and
+ * (c) say so when a response is truncated instead of reporting "empty summary".
+ */
+describe('/api/summarize — thinking models', () => {
+  test('sends no reasoning_effort by default, so flash-lite is untouched', async () => {
+    await post({ text: words(100) });
+    expect(sent()).not.toHaveProperty('reasoning_effort');
+    expect(prompts().maxTokens).toBe(220);
+  });
+
+  test('forwards the configured reasoning effort', async () => {
+    vi.stubEnv('SUMMARY_REASONING_EFFORT', 'low');
+    await post({ text: words(100) });
+    expect(sent().reasoning_effort).toBe('low');
+  });
+
+  test('adds thinking headroom to every band so the answer survives the reasoning pass', async () => {
+    vi.stubEnv('SUMMARY_REASONING_EFFORT', 'low');
+    for (const [n, bare] of [
+      [200, 220],
+      [1200, 400],
+      [3000, 700],
+      [8000, 1100],
+    ] as const) {
+      fetchMock.mockClear();
+      await post({ text: words(n) });
+      expect(prompts().maxTokens).toBe(bare + 1000);
+    }
+  });
+
+  test('the headroom is tunable for higher reasoning efforts', async () => {
+    vi.stubEnv('SUMMARY_REASONING_EFFORT', 'high');
+    vi.stubEnv('SUMMARY_THINKING_HEADROOM', '4000');
+    await post({ text: words(200) });
+    expect(prompts().maxTokens).toBe(220 + 4000);
+  });
+
+  test('headroom is not added when reasoning is off, whatever the headroom says', async () => {
+    vi.stubEnv('SUMMARY_THINKING_HEADROOM', '4000');
+    await post({ text: words(200) });
+    expect(prompts().maxTokens).toBe(220);
+  });
+
+  test('a budget-truncated completion names the cap instead of "empty summary"', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const r = await post({ text: words(100) });
+    expect(r.status).toBe(502);
+    const data = await r.json();
+    expect(data.error).toContain('truncated');
+    // The operator needs the number to know what to raise.
+    expect(String(data.error)).toContain('220');
+  });
+
+  test('a truncated but non-empty summary is still returned', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'Half a summ' }, finish_reason: 'length' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const r = await post({ text: words(100) });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ summary: 'Half a summ' });
+  });
+});

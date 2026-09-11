@@ -16,10 +16,30 @@ import { NextRequest, NextResponse } from 'next/server';
 //                       Groq:             https://api.groq.com/openai/v1
 //                       local (Ollama):   http://host:11434/v1
 //
+//   SUMMARY_REASONING_EFFORT   optional — unset by default, which sends no
+//                     reasoning field at all (what gemini-3.1-flash-lite and
+//                     other non-thinking models want). Set low|medium|high to
+//                     use a thinking model; read THINKING_HEADROOM first.
+//   SUMMARY_THINKING_HEADROOM  optional — default 1000. Only applied when
+//                     SUMMARY_REASONING_EFFORT is set.
+//
 // The key stays server-side and the route is only reachable behind the app gate.
 
 const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
+
+// Extra `max_tokens` granted when reasoning is on, over and above the band's
+// answer budget.
+//
+// Thinking models are a different animal from the flash-lite default. Gemini
+// 3.x flash reasons by default (MEDIUM; 'minimal' is rejected outright), bills
+// thinking tokens at the OUTPUT rate, and — the part that actually breaks
+// things — counts them against `max_tokens`, which is a COMBINED thinking +
+// answer budget rather than an answer budget. The bands in summaryShapeFor size
+// the ANSWER alone, so a 220-token cap is swallowed whole by the reasoning pass
+// and the completion arrives empty. Hence this headroom, added to every band
+// whenever reasoning is enabled. Raise it for higher efforts.
+const DEFAULT_THINKING_HEADROOM = 1000;
 
 // Input budget. This used to be 6,000 chars (~1,000 English words, fewer in
 // Hebrew), which meant an 8,000-word feature was summarized from its first
@@ -81,6 +101,9 @@ export async function POST(request: NextRequest) {
   }
   const model = process.env['SUMMARY_MODEL'] || DEFAULT_MODEL;
   const baseUrl = (process.env['SUMMARY_BASE_URL'] || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const reasoningEffort = process.env['SUMMARY_REASONING_EFFORT']?.trim() || '';
+  const thinkingHeadroom =
+    Number(process.env['SUMMARY_THINKING_HEADROOM']) || DEFAULT_THINKING_HEADROOM;
 
   let payload: { text?: string; blurb?: string };
   try {
@@ -97,6 +120,8 @@ export async function POST(request: NextRequest) {
   // body had to be trimmed to fit.
   const words = countWords(fullText);
   const shape = summaryShapeFor(words);
+  // The band sizes the answer; reasoning models need room to think on top of it.
+  const maxTokens = shape.maxTokens + (reasoningEffort ? thinkingHeadroom : 0);
   const text = fitToBudget(fullText, MAX_INPUT_CHARS);
   // The reader has already read the blurb; the summary should COMPLEMENT it, not
   // restate it. Pass it through so the model can skip what's already covered.
@@ -135,7 +160,10 @@ export async function POST(request: NextRequest) {
       headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
         model,
-        max_tokens: shape.maxTokens,
+        max_tokens: maxTokens,
+        // Omitted entirely when unset: a non-thinking model must not be sent a
+        // reasoning field it will reject or silently mishandle.
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
@@ -156,10 +184,25 @@ export async function POST(request: NextRequest) {
   }
 
   const data = (await upstream.json().catch(() => null)) as {
-    choices?: { message?: { content?: string } }[];
+    choices?: { message?: { content?: string }; finish_reason?: string }[];
   } | null;
-  const summary = data?.choices?.[0]?.message?.content?.trim() ?? '';
+  const choice = data?.choices?.[0];
+  const summary = choice?.message?.content?.trim() ?? '';
   if (!summary) {
+    // A thinking model that spent the whole combined budget on reasoning emits
+    // no text at all. That is NOT the same failure as a model with nothing to
+    // say, and the remedy (raise the headroom) is unguessable from a bare
+    // "empty summary" — so name the budget it hit.
+    if (choice?.finish_reason === 'length') {
+      return NextResponse.json(
+        {
+          error:
+            `summary truncated: hit the ${maxTokens}-token budget before emitting any text` +
+            (reasoningEffort ? ' — raise SUMMARY_THINKING_HEADROOM' : ''),
+        },
+        { status: 502 },
+      );
+    }
     return NextResponse.json({ error: 'empty summary' }, { status: 502 });
   }
   // Model says the blurb already covers everything — tell the client so it can
