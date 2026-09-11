@@ -41,8 +41,12 @@ if (typeof globalWithCSS.CSS.escape !== 'function') {
 
 // This runner exposes Node's experimental `localStorage` (throws without
 // --localstorage-file), so any code — production or test — that touches it
-// crashes. Provide a plain in-memory Storage so localStorage behaves normally
-// under test (unblocks the RSVP controller/overlay suites; see review B4/F1).
+// crashes. jsdom's own window.localStorage is a real, working Storage, so
+// prefer it and install THAT on every global alias; only fall back to a plain
+// in-memory mock when jsdom's is unusable. The real jsdom instance matters:
+// jsdom type-checks `StorageEvent.storageArea` and rejects a plain object
+// (upstream's KeyboardShortcutsSettings tests dispatch such events).
+// Unblocks the RSVP controller/overlay suites; see review B4/F1.
 {
   const store = new Map<string, string>();
   const mock: Storage = {
@@ -59,6 +63,22 @@ if (typeof globalWithCSS.CSS.escape !== 'function') {
       store.set(k, String(v));
     },
   };
+  const jsdomStorage = (() => {
+    try {
+      // vitest's jsdom environment leaves Node's own (non-functional)
+      // `localStorage` accessor on the global untouched, but `frames` still
+      // resolves to the real jsdom window, whose Storage is the genuine one.
+      const win = (globalThis as { frames?: Window }).frames;
+      const ls = win && win !== (globalThis as unknown as Window) ? win.localStorage : undefined;
+      if (!ls) return undefined;
+      ls.setItem('__readest_probe__', '1');
+      ls.removeItem('__readest_probe__');
+      return ls;
+    } catch {
+      return undefined;
+    }
+  })();
+  const storage: Storage = jsdomStorage ?? mock;
   const install = (target: object | undefined) => {
     if (!target) return;
     try {
@@ -70,11 +90,11 @@ if (typeof globalWithCSS.CSS.escape !== 'function') {
       Object.defineProperty(target, 'localStorage', {
         configurable: true,
         writable: true,
-        value: mock,
+        value: storage,
       });
     } catch {
       try {
-        (target as Record<string, unknown>).localStorage = mock;
+        (target as Record<string, unknown>).localStorage = storage;
       } catch {
         /* give up on this alias */
       }

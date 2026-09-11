@@ -58,6 +58,7 @@ function mockRouter() {
     forward: vi.fn(),
     refresh: vi.fn(),
     prefetch: vi.fn(),
+    bfcacheId: 'test-bfcache-id',
   };
 }
 
@@ -324,13 +325,31 @@ describe('showReaderWindow', () => {
     expect(url).toContain('ids=book1%2Bbook2');
   });
 
+  test('preserves the exact CFI and transient highlight in the reader window URL', () => {
+    const appService = makeAppService();
+    const cfi = 'epubcfi(/6/2!/4/2:1)';
+    showReaderWindow(
+      appService as never,
+      ['book1'],
+      `cfi=${encodeURIComponent(cfi)}&highlight=search`,
+    );
+
+    const url = vi.mocked(WebviewWindow).mock.calls[0]![1]!.url as string;
+    const params = new URLSearchParams(url.split('?')[1]);
+    expect(params.get('ids')).toBe('book1');
+    expect(params.get('cfi')).toBe(cfi);
+    expect(params.get('highlight')).toBe('search');
+  });
+
   test('uses macOS-specific window options', () => {
     const appService = makeAppService(true);
     showReaderWindow(appService as never, ['book1']);
 
     const constructorCall = vi.mocked(WebviewWindow).mock.calls[0]!;
     const options = constructorCall[1]!;
-    expect(options.title).toBe('');
+    // The overlay title bar hides its title text natively, so the window is
+    // named like every other platform's.
+    expect(options.title).toBe('Readest');
     expect(options.decorations).toBe(true);
     expect(options.titleBarStyle).toBe('overlay');
   });

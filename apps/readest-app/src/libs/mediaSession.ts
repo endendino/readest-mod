@@ -18,6 +18,14 @@ export interface PlaybackState {
 
 export interface MediaSessionState {
   active: boolean;
+  // Android: whether the media service should hold the app's audio focus for
+  // this session. True for audio the app renders itself (TTS engines,
+  // WebAudio, the native narration player). FALSE when the audio plays through
+  // a WebView media element: Chromium requests audio focus for that element
+  // under the same uid, the service's competing request loses to it, and the
+  // resulting AUDIOFOCUS_LOSS comes back as a synthetic media-session-pause
+  // that stops playback the app itself just started.
+  ownsAudioFocus?: boolean;
   notificationTitle?: string;
   notificationText?: string;
   foregroundServiceTitle?: string;
@@ -224,16 +232,23 @@ export class IOSCompositeMediaSession extends TauriMediaSession {
         }
       ).MediaMetadata;
       if (MediaMetadataCtor) {
-        const artwork = metadata.artwork
-          ? [
-              {
-                src: metadata.artwork,
-                // WebKit silently drops MIME-mismatched artwork; sniff the
-                // type from the data URL instead of assuming one.
-                type: /^data:(image\/[a-z+]+)/.exec(metadata.artwork)?.[1] ?? 'image/png',
-              },
-            ]
-          : [];
+        // Title-only native refreshes omit artwork; keep the prior web cover so
+        // the WebKit Now Playing client (which can win the system election)
+        // does not flash a blank card.
+        const artwork =
+          metadata.artwork && metadata.artwork.length > 0
+            ? [
+                {
+                  src: metadata.artwork,
+                  // WebKit silently drops MIME-mismatched artwork; sniff the
+                  // type from the data URL instead of assuming one.
+                  type: /^data:(image\/[a-z+]+)/.exec(metadata.artwork)?.[1] ?? 'image/png',
+                },
+              ]
+            : Array.from(this.web.metadata?.artwork ?? []).map((a) => ({
+                src: a.src,
+                type: a.type,
+              }));
         this.web.metadata = new MediaMetadataCtor({
           title: metadata.title ?? '',
           artist: metadata.artist ?? '',

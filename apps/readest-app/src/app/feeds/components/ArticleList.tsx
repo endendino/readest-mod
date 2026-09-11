@@ -348,7 +348,7 @@ const ArticleRow = memo(function ArticleRow({
                 visited ? 'text-base-content/60 font-normal' : 'font-medium',
               )}
             >
-              {opening && <span className='loading loading-spinner loading-xs flex-shrink-0' />}
+              {opening && <span className='loading loading-spinner loading-xs shrink-0' />}
               <span>{a.title}</span>
             </span>
             <span className='text-base-content/50 text-xs'>
@@ -371,7 +371,7 @@ const ArticleRow = memo(function ArticleRow({
             onClick={() => onDismiss(a)}
             aria-label={_('Mark read')}
             title={_('Mark read')}
-            className='text-base-content/30 hover:text-error hidden flex-shrink-0 items-center px-3 sm:flex'
+            className='text-base-content/30 hover:text-error hidden shrink-0 items-center px-3 sm:flex'
           >
             <MdClose className='h-5 w-5' />
           </button>
@@ -750,7 +750,7 @@ export const ArticleList = () => {
     >
       {(searchOpen || query) && (
         <div className='border-base-200 flex items-center gap-2 border-b px-4 py-2'>
-          <MdSearch className='text-base-content/40 h-5 w-5 flex-shrink-0' />
+          <MdSearch className='text-base-content/40 h-5 w-5 shrink-0' />
           <input
             ref={searchRef}
             type='search'
@@ -759,7 +759,7 @@ export const ArticleList = () => {
             onChange={(e) => setQuery(e.target.value)}
             placeholder={_('Filter articles…')}
             aria-label={_('Filter articles')}
-            className='min-w-0 flex-1 bg-transparent text-[15px] outline-none'
+            className='min-w-0 flex-1 bg-transparent text-[15px] outline-hidden'
           />
           <button
             type='button'
@@ -768,7 +768,7 @@ export const ArticleList = () => {
               setSearchOpen(false);
             }}
             aria-label={_('Close search')}
-            className='text-base-content/40 hover:text-base-content flex h-10 w-10 flex-shrink-0 items-center justify-center'
+            className='text-base-content/40 hover:text-base-content flex h-10 w-10 shrink-0 items-center justify-center'
           >
             <MdClose className='h-5 w-5' />
           </button>

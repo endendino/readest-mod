@@ -333,6 +333,10 @@ const RSVPOverlay: React.FC<RSVPOverlayProps> = ({
       // Dictionary management (settings dialog) opens OVER RSVP; let it own the
       // keyboard so its inputs accept space and Escape closes it, not RSVP.
       if (isSettingsDialogOpen) return;
+      // A focused text field (the WPM entry in the speed dropdown) owns its
+      // keystrokes: arrows move the caret, Space/digits type, Escape discards
+      // the draft. The reader's own shortcuts already ignore inputs.
+      if (event.target instanceof HTMLInputElement && event.target.type === 'text') return;
 
       // The progress slider owns arrow keys while focused (#D1): the global
       // capture handler must not steal ArrowLeft/Right, or the slider (role=slider)
@@ -501,10 +505,10 @@ const RSVPOverlay: React.FC<RSVPOverlayProps> = ({
     const onVisibility = () => {
       if (document.hidden) pauseIfPlaying();
     };
-    window.addEventListener('blur', pauseIfPlaying);
+    window.addEventListener('blur-sm', pauseIfPlaying);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      window.removeEventListener('blur', pauseIfPlaying);
+      window.removeEventListener('blur-sm', pauseIfPlaying);
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [controller]);
@@ -993,6 +997,7 @@ const RSVPOverlay: React.FC<RSVPOverlayProps> = ({
       data-testid='rsvp-overlay'
       role='dialog'
       aria-modal='true'
+      data-capture-blocking-overlay='true'
       aria-label={_('Speed Reading')}
       tabIndex={-1}
       // RTL books mirror the whole overlay. The layout is built on logical
@@ -1003,6 +1008,11 @@ const RSVPOverlay: React.FC<RSVPOverlayProps> = ({
       style={{
         paddingTop: `${gridInsets.top}px`,
         paddingBottom: `${gridInsets.bottom * 0.33}px`,
+        // Physical (not logical) padding: in landscape the notch and rounded
+        // corners sit on a fixed side of the device, so these must not flip
+        // with the book's reading direction.
+        paddingLeft: `${gridInsets.left}px`,
+        paddingRight: `${gridInsets.right}px`,
         backgroundColor: bgColor,
         color: fgColor,
         backdropFilter: 'none',
@@ -1524,7 +1534,7 @@ const RSVPOverlay: React.FC<RSVPOverlayProps> = ({
             <label className='flex cursor-pointer items-center gap-1.5 font-medium opacity-80'>
               <span className='me-0.5 font-medium opacity-50'>{_('Punctuation Delay')}</span>
               <select
-                className='cursor-pointer rounded border border-gray-500/30 bg-gray-500/20 px-1.5 py-1 text-xs font-medium transition-colors hover:border-gray-500/40 hover:bg-gray-500/30'
+                className='cursor-pointer rounded-sm border border-gray-500/30 bg-gray-500/20 px-1.5 py-1 text-xs font-medium transition-colors hover:border-gray-500/40 hover:bg-gray-500/30'
                 style={{ color: 'inherit' }}
                 value={state.punctuationPauseMs}
                 onChange={(e) => controller.setPunctuationPause(parseInt(e.target.value, 10))}
@@ -1542,7 +1552,7 @@ const RSVPOverlay: React.FC<RSVPOverlayProps> = ({
               <span className='me-0.5 font-medium opacity-50'>{_('Start Delay')}</span>
               <select
                 data-testid='rsvp-start-delay-select'
-                className='cursor-pointer rounded border border-gray-500/30 bg-gray-500/20 px-1.5 py-1 text-xs font-medium transition-colors hover:border-gray-500/40 hover:bg-gray-500/30'
+                className='cursor-pointer rounded-sm border border-gray-500/30 bg-gray-500/20 px-1.5 py-1 text-xs font-medium transition-colors hover:border-gray-500/40 hover:bg-gray-500/30'
                 style={{ color: 'inherit' }}
                 value={state.startDelaySeconds}
                 onChange={(e) => controller.setStartDelay(parseInt(e.target.value, 10))}

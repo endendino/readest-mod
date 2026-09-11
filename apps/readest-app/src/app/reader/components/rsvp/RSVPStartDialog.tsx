@@ -86,7 +86,7 @@ const RSVPStartDialog: React.FC<RSVPStartDialogProps> = ({ startChoice, onSelect
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className='mx-4 w-full max-w-md rounded-2xl p-6 shadow-2xl focus:outline-none'
+        className='mx-4 w-full max-w-md rounded-2xl p-6 shadow-2xl focus:outline-hidden'
         style={{ backgroundColor: bgColor, color: fgColor, opacity: 1 }}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}

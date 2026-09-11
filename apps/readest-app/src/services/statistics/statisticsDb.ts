@@ -13,7 +13,7 @@ interface BookRow extends DatabaseRow {
   pages: number;
 }
 
-type CursorKey = 'push' | 'pull';
+type CursorKey = 'push' | 'pull' | 'bookorbit-push';
 
 /**
  * Per-tab singleton open promise. OPFS permits only ONE access handle per file
@@ -52,10 +52,14 @@ export class StatisticsDb {
   static async open(appService: AppService): Promise<StatisticsDb> {
     bindLifecycle();
     if (!sharedDb) {
-      sharedDb = (async () => {
+      const opening = (async () => {
         const db = await appService.openDatabase('statistics', 'statistics.db', 'Data');
         return new StatisticsDb(db);
       })();
+      sharedDb = opening;
+      void opening.catch(() => {
+        if (sharedDb === opening) sharedDb = null;
+      });
     }
     return sharedDb;
   }

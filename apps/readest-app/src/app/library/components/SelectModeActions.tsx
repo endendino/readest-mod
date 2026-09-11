@@ -6,6 +6,8 @@ import {
   MdOutlineCancel,
   MdInfoOutline,
   MdCheckCircleOutline,
+  MdOutlineCloudDownload,
+  MdWifiTethering,
 } from 'react-icons/md';
 import { IoShareSocialOutline } from 'react-icons/io5';
 import { LuFolderPlus } from 'react-icons/lu';
@@ -22,15 +24,25 @@ interface SelectModeActionsProps {
   // the book file to the OS share sheet), distinct from "Share Book" in
   // the per-item context menu, which generates a remote share link.
   sendEnabled?: boolean;
+  // False when nothing in the selection can be pulled from the cloud — every
+  // selected book is either already on this device or was never uploaded.
+  canDownload?: boolean;
   onOpen: () => void;
   onGroup: () => void;
   onDetails: () => void;
   onStatus: () => void;
+  // Queues every cloud-only book in the selection, groups included (#5244).
+  onDownload: () => void;
   // The macOS / iPad share popover is anchored to the selected book's
   // cover (located via its data-book-hash attribute), not to this
   // button — the user's visual focus is on the cover they just tapped.
   // On iOS / Android the share sheet is modal and ignores position.
   onSend: () => void;
+  // Hidden unless the LocalSend integration is enabled on this device.
+  // Sends the selected books to a nearby LocalSend peer; unlike onSend it
+  // works on every Tauri platform (no OS share sheet involved).
+  sendNearbyEnabled?: boolean;
+  onSendNearby?: () => void;
   onDelete: () => void;
   onCancel: () => void;
   // Reports the popup's rendered height (including its safe-area padding) so the
@@ -43,11 +55,15 @@ const SelectModeActions: React.FC<SelectModeActionsProps> = ({
   selectedBooks,
   safeAreaBottom,
   sendEnabled = true,
+  canDownload = false,
   onOpen,
   onGroup,
   onDetails,
   onStatus,
+  onDownload,
   onSend,
+  sendNearbyEnabled = false,
+  onSendNearby,
   onDelete,
   onCancel,
   onHeightChange,
@@ -134,13 +150,24 @@ const SelectModeActions: React.FC<SelectModeActionsProps> = ({
           <MdInfoOutline />
           <div>{_('Details')}</div>
         </button>
+        <button
+          onClick={onDownload}
+          className={clsx(
+            'flex flex-col items-center justify-center gap-1',
+            // Heads the second row on narrow viewports; everything after it
+            // (Send / Delete / Cancel) then flows behind it.
+            'max-[500px]:col-start-1',
+            !canDownload && 'btn-disabled opacity-50',
+          )}
+        >
+          <MdOutlineCloudDownload />
+          <div>{_('Download')}</div>
+        </button>
         {sendEnabled && (
           <button
             onClick={onSend}
             className={clsx(
               'flex flex-col items-center justify-center gap-1',
-              // Wraps to the start of the second row on narrow viewports.
-              'max-[500px]:col-start-1',
               (!hasSingleSelection || !hasValidBooks) && 'btn-disabled opacity-50',
             )}
           >
@@ -148,16 +175,22 @@ const SelectModeActions: React.FC<SelectModeActionsProps> = ({
             <div>{_('Send')}</div>
           </button>
         )}
+        {sendNearbyEnabled && (
+          <button
+            onClick={onSendNearby}
+            className={clsx(
+              'flex flex-col items-center justify-center gap-1',
+              (!hasSelection || !hasValidBooks) && 'btn-disabled opacity-50',
+            )}
+          >
+            <MdWifiTethering />
+            <div>{_('Nearby')}</div>
+          </button>
+        )}
         <button
           onClick={onDelete}
           className={clsx(
             'flex flex-col items-center justify-center gap-1',
-            // Without Send (Linux/Windows/web), Delete needs an explicit
-            // col-start-2 so the wrapped row {Delete, Cancel} stays centred
-            // under the 4-col grid. With Send present, the layout is
-            // {Send, Delete, Cancel} starting at col-start-1, so Delete
-            // naturally lands in col-start-2 without an override.
-            !sendEnabled && 'max-[500px]:col-start-2',
             !hasSelection && 'btn-disabled opacity-50',
           )}
         >

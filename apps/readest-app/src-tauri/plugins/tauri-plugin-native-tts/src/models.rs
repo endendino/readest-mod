@@ -66,6 +66,11 @@ pub struct GetVoicesResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SetMediaSessionActiveRequest {
     pub active: bool,
+    // Android: whether the media service should hold the app's audio focus for
+    // this session. False when the session's audio plays through a WebView
+    // media element, which Chromium already requests focus for (see
+    // MediaPlaybackService.ownsAudioFocus). Defaults to true when absent.
+    pub owns_audio_focus: Option<bool>,
     pub notification_title: Option<String>,
     pub notification_text: Option<String>,
     pub foreground_service_title: Option<String>,
@@ -122,6 +127,10 @@ pub struct PlayoutEnqueueResponse {
 pub struct PlayoutControlRequest {
     pub action: String,
     pub rate: Option<f64>,
+    // Absolute file path for action "load" (Media Overlay continuous playout).
+    pub path: Option<String>,
+    // Seek target for actions "load" and "seek", in milliseconds.
+    pub position_ms: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

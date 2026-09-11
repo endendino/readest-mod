@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Trans } from 'react-i18next';
 import type { Insets } from '@/types/misc';
 import { useEnv } from '@/context/EnvContext';
@@ -13,6 +13,13 @@ import {
   getChapterTickFractions,
   getReferencePageInfo,
 } from '@/utils/progress';
+import { footerInfoVisible, footerReservesBand } from '../utils/footerBand';
+import {
+  getChromeChip,
+  getChromeFontSize,
+  getChromeTextColor,
+  isChromeStyled,
+} from '../utils/headerFooterStyle';
 import StatusInfo from './StatusInfo.tsx';
 import StickyProgressBar from './StickyProgressBar.tsx';
 import { convertPagesToTimeRemainingMinutes } from '@/app/library/utils/libraryUtils.ts';
@@ -135,28 +142,62 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   const hasTimeInfo = viewSettings.showCurrentTime;
   const hasBatteryInfo = viewSettings.showCurrentBatteryStatus;
 
-  // The footer is display-only: the full-width container stays
-  // pointer-events-none so it never intercepts taps or text selection over
-  // book content along the bottom of the page. To hide it, use Settings →
-  // Layout → Show Footer.
-  //
+  // Tap to toggle (#5293): tapping the footer hides/shows the info without
+  // touching layout or settings — the reserved band stays so the book text
+  // never reflows, showFooter is never written, and the state resets when the
+  // book reopens. The full-width container stays pointer-events-none so taps
+  // and text selection over book content pass through; only the strip (or the
+  // pills in scrolled mode, see below) is a tap target.
+  const [dismissed, setDismissed] = useState(false);
+
   // Scrolled mode reserves no bottom band (footerReservesBand) — the info
   // floats over the book text, so each segment carries its own shrink-wrapped
-  // pill backdrop to stay legible instead of a full-width bar.
+  // pill backdrop to stay legible instead of a full-width bar. The pills
+  // double as the tap targets there: making the whole strip tappable would
+  // swallow taps and text selection over the last lines of the page, so the
+  // strip is only a target where it sits on reserved margin space (paginated
+  // band, sticky-bar band, vertical side column).
+  const hasFooterContent = stickyBarActive || footerInfoVisible(viewSettings);
+  const stripTappable = hasFooterContent && (isVertical || footerReservesBand(viewSettings));
+  // The sticky bar reserves the band again, so `auto` needs no pill there; a
+  // color the reader chose still paints, since they asked to see it (#5938).
+  const chip = getChromeChip(viewSettings, 'footer', {
+    isEink,
+    isScrolled: !!viewSettings.scrolled,
+    isVertical: !!isVertical,
+    bandReserved: stickyBarActive,
+  });
+  // The segment is the tap target for #5293 wherever the info floats over the
+  // text -- that has to hold even when the reader turns the backdrop off, or
+  // "Background: none" would silently take tap-to-toggle away with it.
+  const pillTappable = !!viewSettings.scrolled && !isVertical && !stickyBarActive;
   const pillClass =
-    viewSettings.scrolled &&
-    !isVertical &&
-    !stickyBarActive &&
-    'progress-pill eink-bordered rounded-md bg-base-100/85 px-1.5';
+    (pillTappable || chip) &&
+    clsx(
+      'progress-pill rounded-md px-1.5',
+      pillTappable && 'pointer-events-auto cursor-pointer',
+      chip && 'eink-bordered',
+      chip?.kind === 'theme' && 'bg-base-100/85',
+    );
+  const pillStyle = chip?.kind === 'custom' ? { backgroundColor: chip.color } : undefined;
+  const textColor = getChromeTextColor(viewSettings, isEink);
+  const fontSize = getChromeFontSize(viewSettings, isEink);
   const showStatusInfo = hasTimeInfo || hasBatteryInfo;
 
   return (
     <div
       role='presentation'
       className={clsx(
-        'progressinfo pointer-events-none absolute bottom-0 flex items-center justify-between font-sans',
-        isEink ? 'text-sm font-normal' : 'text-xs font-extralight',
-        bookData?.isFixedLayout && !isEink
+        'progressinfo pointer-events-none absolute bottom-0 z-10 flex items-center justify-between font-sans',
+        isEink ? 'font-normal' : 'font-extralight',
+        // The blend keeps the info legible over an unthemed fixed-layout page,
+        // but it composites the whole container as a group -- with the pills on
+        // it differences a white pill against the white page and paints it pure
+        // black (#5342). The pill backdrop already guarantees legibility, so it
+        // takes over from the blend whenever it is present. A reader who set
+        // their own color or backdrop (#5938) has taken over too: the blend
+        // would invert their text color and black out their chip.
+        bookData?.isFixedLayout && !isEink && !pillClass && !isChromeStyled(viewSettings)
           ? 'text-white/75 mix-blend-difference'
           : 'text-base-content',
         isVertical ? 'writing-vertical-rl' : 'w-full',
@@ -173,8 +214,12 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
       ]
         .filter(Boolean)
         .join(', ')}
-      style={
-        isVertical
+      style={{
+        // Set on the container so the pills, the status widgets and the sticky
+        // bar (which inherits currentColor) all resolve from one place.
+        fontSize: `${fontSize}px`,
+        ...(textColor ? { color: textColor } : {}),
+        ...(isVertical
           ? {
               top: `${(contentInsets.top - gridInsets.top) * 1.5}px`,
               bottom: `${(contentInsets.bottom - gridInsets.bottom) * 1.5}px`,
@@ -187,13 +232,17 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
               paddingInlineStart: `calc(${horizontalGap / 2}% + ${contentInsets.left / 2}px)`,
               paddingInlineEnd: `calc(${horizontalGap / 2}% + ${contentInsets.right / 2}px)`,
               paddingBottom: appService?.hasSafeAreaInset ? `${gridInsets.bottom * 0.33}px` : 0,
-            }
-      }
+            }),
+      }}
     >
       <div
         aria-hidden='true'
+        onClick={hasFooterContent ? () => setDismissed((prev) => !prev) : undefined}
         className={clsx(
-          'flex items-center',
+          'progress-strip flex items-center',
+          stripTappable && 'pointer-events-auto cursor-pointer',
+          dismissed && 'opacity-0',
+          !isEink && 'transition-opacity duration-300',
           isVertical ? 'h-full' : 'w-full',
           // Sticky bar grows on the left; the info widgets pack to the right
           // with even gaps. Without it, keep the 3-zone left/center/right row.
@@ -218,9 +267,11 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             )}
           >
             {viewSettings.showRemainingTime ? (
-              <span className={clsx('time-left-label text-start', pillClass)}>{timeLeftStr}</span>
+              <span className={clsx('time-left-label text-start', pillClass)} style={pillStyle}>
+                {timeLeftStr}
+              </span>
             ) : viewSettings.showRemainingPages && showPagesLeft ? (
-              <span className={clsx('text-start', pillClass)}>
+              <span className={clsx('text-start', pillClass)} style={pillStyle}>
                 {localize ? (
                   remainingInBook ? (
                     <Trans
@@ -264,12 +315,13 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             isVertical={isVertical}
             isEink={isEink}
             className={pillClass || undefined}
+            style={pillStyle}
           />
         )}
 
         <div
           className={clsx(
-            'progress-info items-center text-end tabular-nums truncate',
+            'progress-readout items-center text-end tabular-nums truncate',
             !stickyBarActive && 'flex-1 min-w-0',
           )}
         >
@@ -280,6 +332,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                 isVertical ? 'mt-auto' : 'ms-auto',
                 pillClass,
               )}
+              style={pillStyle}
             >
               {progressInfo}
             </span>

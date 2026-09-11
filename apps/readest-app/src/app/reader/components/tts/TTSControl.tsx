@@ -5,11 +5,11 @@ import { useReaderStore } from '@/store/readerStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
 import { useTTSDownloads } from '@/app/reader/hooks/useTTSDownloads';
-import { useBookProgress } from '@/store/readerProgressStore';
 import { Insets } from '@/types/misc';
 import { eventDispatcher } from '@/utils/event';
 import TTSMiniPlayer from './TTSMiniPlayer';
 import TTSPlayerSheet from './TTSPlayerSheet';
+import { useMiniPlayerAutoHide } from './useMiniPlayerAutoHide';
 
 interface TTSControlProps {
   bookKey: string;
@@ -32,11 +32,15 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
   });
 
   const downloads = useTTSDownloads(bookKey, tts.getController, showPlayerSheet);
-  const activeSectionIndex = useBookProgress(bookKey)?.index ?? null;
+  const activeSectionIndex = tts.ttsSectionIndex;
 
-  const isEink = getViewSettings(bookKey)?.isEink ?? false;
+  const viewSettings = getViewSettings(bookKey);
+  const isEink = viewSettings?.isEink ?? false;
+  const playerStyle = viewSettings?.ttsPlayerStyle ?? 'full';
   const hasTimeline = tts.ttsClientsInited && tts.handleSupportsPlaybackInfo();
-  const hasGapControl = tts.ttsClientsInited && tts.handleSupportsGapControl();
+  const audioTransport = tts.ttsClientsInited && tts.audioTransport;
+  const miniPlayerMounted = tts.showIndicator && !showPlayerSheet;
+  const miniPlayerVisible = useMiniPlayerAutoHide(bookKey, playerStyle, miniPlayerMounted);
 
   useEffect(() => {
     if (tts.showBackToCurrentTTSLocation) {
@@ -90,19 +94,22 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
               safeAreaInsets?.top ? 'h-11' : 'h-9',
             )}
           >
-            {_('Back to TTS Location')}
+            {_('Back to Read Aloud')}
           </button>
         </div>
       )}
       {/* One surface at a time: the sheet replaces the mini player while open.
           Mounts on showIndicator alone so the card appears the moment the
           session starts, before the TTS clients finish initializing. */}
-      {tts.showIndicator && !showPlayerSheet && (
+      {miniPlayerMounted && (
         <TTSMiniPlayer
           bookKey={bookKey}
           isPlaying={tts.isPlaying}
+          buffering={tts.buffering}
           isEink={isEink}
+          visible={miniPlayerVisible}
           hasTimeline={hasTimeline}
+          audioTransport={audioTransport}
           timeoutTimestamp={tts.timeoutTimestamp}
           chapterRemainingSec={tts.chapterRemainingSec}
           gridInsets={gridInsets}
@@ -121,7 +128,7 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           ttsLang={tts.ttsLang}
           isPlaying={tts.isPlaying}
           hasTimeline={hasTimeline}
-          hasGapControl={hasGapControl}
+          audioTransport={audioTransport}
           timeoutOption={tts.timeoutOption}
           timeoutTimestamp={tts.timeoutTimestamp}
           chapterRemainingSec={tts.chapterRemainingSec}
@@ -130,8 +137,6 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           onBackward={tts.handleBackward}
           onForward={tts.handleForward}
           onSetRate={tts.handleSetRate}
-          onSetSentenceGap={tts.handleSetSentenceGap}
-          onSetParagraphGap={tts.handleSetParagraphGap}
           onGetVoices={tts.handleGetVoices}
           onSetVoice={tts.handleSetVoice}
           onGetVoiceId={tts.handleGetVoiceId}
@@ -139,6 +144,12 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
           onSeek={tts.handleSeekTo}
           onSeekPreview={tts.handleSeekPreview}
           onGetPlaybackInfo={tts.handleGetPlaybackInfo}
+          supportsLyrics={tts.supportsLyrics}
+          buffering={tts.buffering}
+          onGetLyrics={tts.handleGetLyrics}
+          onGetActiveIndex={tts.handleGetLyricActiveIndex}
+          onGetLyricPage={tts.handleGetLyricPage}
+          onPlayFromLyric={tts.handlePlayFromLyric}
           downloads={downloads}
           activeSectionIndex={activeSectionIndex}
         />

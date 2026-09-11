@@ -7,7 +7,7 @@ Readest is a cross-platform ebook reader built as a **Next.js 16 + Tauri v2** hy
 ```bash
 # Development
 pnpm dev-web               # Web-only dev server (no Rust compilation needed)
-pnpm tauri dev             # Desktop dev with Tauri (compiles Rust backend)
+pnpm tauri dev             # Desktop dev with Tauri (compiles Rust backend); on Linux this is the CEF runtime (needs Rust >= 1.95)
 
 # Building
 pnpm build                 # Build Next.js for Tauri
@@ -22,13 +22,16 @@ pnpm tauri:dev:test        # Start Tauri app with webdriver
 pnpm test:tauri            # Run Tauri integration tests
 
 # Linting & Formatting
-pnpm lint                  # Biome (linter) + tsgo (type check)
+pnpm lint                  # Biome (linter) + tsc (type check)
 pnpm format                # Biome formatter (runs from monorepo root)
 pnpm format:check          # Check formatting without writing (Biome)
 
 # Rust
 pnpm fmt:check             # Check formatting Rust code (src-tauri)
 pnpm clippy:check          # Lint Rust code (src-tauri)
+
+# Dictionary tooling
+pnpm dictionary:yomitan:convert <input.zip> [output.rdict]  # Build a portable Yomitan dictionary
 ```
 
 ### Source Layout
@@ -41,6 +44,7 @@ pnpm clippy:check          # Lint Rust code (src-tauri)
 | `src/store/`      | Zustand state stores                                          |
 | `src/hooks/`      | Custom React hooks                                            |
 | `src/libs/`       | Document loaders, payment, storage, sync                      |
+| `src/plugins/`    | Bundled plugin implementations, including Yomitan             |
 | `src/utils/`      | Pure utility functions                                        |
 | `src/types/`      | TypeScript type definitions                                   |
 | `src/context/`    | React Context providers (Auth, Env, Sync, etc.)               |
@@ -96,6 +100,10 @@ See [docs/i18n.md](docs/i18n.md) for the key-as-content translation approach, `s
 
 See [docs/safe-area-insets.md](docs/safe-area-insets.md) for rules on handling top/bottom insets for UI elements near screen edges.
 
+### Read Aloud
+
+Four engines sit behind `TTSClient`, including recorded-narration playback from EPUB 3 Media Overlays and device-local audiobook pairings. Gate behaviour on `TTSCapabilities`, never on client identity. See [docs/read-along-narration.md](docs/read-along-narration.md).
+
 ### Design System
 
 UI/UX rules — surface tiers, action vocabulary, settings primitives (`BoxedList`, `SettingsRow`, `SettingsSwitchRow`, `SettingsSelect`, `NavigationRow`, `Tips`, etc.), boxed-list anatomy, RTL conventions, e-ink overlay, and anti-patterns — live in [DESIGN.md](DESIGN.md). Codify recurring decisions there so they persist for the team and future contributors. Reach for the primitives in `src/components/settings/primitives/` instead of inlining chassis classes.
@@ -110,3 +118,32 @@ Every new UI widget must look right under `[data-eink='true']`. E-ink screens ha
 - **Don't rely on color/shadow alone for hierarchy.** Two same-tone buttons differ only by hover on color themes, and hover doesn't exist on e-ink touchscreens. Pair a borderless ghost (cancel) with a solid CTA (submit) so eink can invert one without flattening the difference.
 
 When in doubt, toggle E-ink in Settings → Misc and check. The rules in `globals.css` cover most cases automatically, but composite components (custom buttons, layered cards) often need `eink-bordered` on the right element to stay legible.
+
+## Skill routing
+
+When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+
+Key routing rules:
+- Product ideas/brainstorming → invoke /office-hours
+- Strategy/scope → invoke /plan-ceo-review
+- Architecture → invoke /plan-eng-review
+- Design system/plan review → invoke /design-consultation or /plan-design-review
+- Full review pipeline → invoke /autoplan
+- Bugs/errors → invoke /investigate
+- QA/testing site behavior → invoke /qa or /qa-only
+- Code review/diff check → invoke /review
+- Visual polish → invoke /design-review
+- Ship/deploy/PR → invoke /ship or /land-and-deploy
+- Save progress → invoke /context-save
+- Resume context → invoke /context-restore
+- Author a backlog-ready spec/issue → invoke /spec
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

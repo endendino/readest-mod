@@ -484,33 +484,40 @@ export const UpdaterContent = ({
     let lastLogged = 0;
     setProgress(0);
     setIsDownloading(true);
-    await update.downloadAndInstall?.((event) => {
-      switch (event.event) {
-        case 'Started':
-          contentLength = event.data.contentLength!;
-          setContentLength(contentLength);
-          break;
-        case 'Progress':
-          downloaded += event.data.chunkLength;
-          setDownloaded(downloaded);
-          // Guard against a 0 total (server omitted Content-Length): keep the
-          // bar at an indeterminate 0% instead of NaN/Infinity.
-          const percent = contentLength > 0 ? Math.floor((downloaded / contentLength) * 100) : 0;
-          setProgress(percent);
-          if (downloaded - lastLogged >= 1 * 1024 * 1024) {
-            console.log(`downloaded ${downloaded} bytes from ${contentLength}`);
-            lastLogged = downloaded;
-          }
-          break;
-        case 'Finished':
-          console.log('download finished');
-          setProgress(100);
-          break;
+    try {
+      await update.downloadAndInstall?.((event) => {
+        switch (event.event) {
+          case 'Started':
+            contentLength = event.data.contentLength!;
+            setContentLength(contentLength);
+            break;
+          case 'Progress':
+            downloaded += event.data.chunkLength;
+            setDownloaded(downloaded);
+            // Guard against a 0 total (server omitted Content-Length): keep the
+            // bar at an indeterminate 0% instead of NaN/Infinity.
+            const percent = contentLength > 0 ? Math.floor((downloaded / contentLength) * 100) : 0;
+            setProgress(percent);
+            if (downloaded - lastLogged >= 1 * 1024 * 1024) {
+              console.log(`downloaded ${downloaded} bytes from ${contentLength}`);
+              lastLogged = downloaded;
+            }
+            break;
+          case 'Finished':
+            console.log('download finished');
+            setProgress(100);
+            break;
+        }
+      });
+      console.log('package installed');
+      if (!appService?.isAndroidApp && process.env.NODE_ENV === 'production') {
+        await relaunch();
       }
-    });
-    console.log('package installed');
-    if (!appService?.isAndroidApp && process.env.NODE_ENV === 'production') {
-      await relaunch();
+    } catch (error) {
+      console.error('Failed to download and install update:', error);
+      setError(_('Failed to download and install update'));
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -539,7 +546,7 @@ export const UpdaterContent = ({
           </div>
 
           {checkUpdate ? (
-            <div className='text-base-content flex-grow text-sm'>
+            <div className='text-base-content grow text-sm'>
               <h2 className='mb-4 text-center font-bold sm:text-start'>
                 {_('A new version of Readest is available!')}
               </h2>
@@ -553,7 +560,7 @@ export const UpdaterContent = ({
 
               <div className='flex w-full flex-row items-center justify-end gap-4'>
                 {progress !== null && (
-                  <div className='flex flex-grow flex-col'>
+                  <div className='flex grow flex-col'>
                     <progress
                       className='progress my-1 h-4 w-full'
                       value={progress}
@@ -588,7 +595,7 @@ export const UpdaterContent = ({
               </div>
             </div>
           ) : (
-            <div className='text-base-content flex h-full flex-grow flex-col text-sm sm:flex-row'>
+            <div className='text-base-content flex h-full grow flex-col text-sm sm:flex-row'>
               <div className='flex flex-col items-center justify-center gap-4 p-1 sm:items-start sm:gap-2'>
                 <h2 className='text-center font-bold sm:text-start'>
                   {_('Version {{version}}', { version: currentVersion })}
@@ -725,7 +732,7 @@ export const UpdaterWindow = () => {
       isOpen={isOpen}
       title={checkUpdate ? _('Software Update') : _("What's New in Readest")}
       onClose={() => setIsOpen(false)}
-      boxClassName='sm:!w-[75%] sm:h-auto sm:!max-h-[85vh] sm:!max-w-2xl'
+      boxClassName='sm:w-[75%]! sm:h-auto sm:max-h-[85vh]! sm:max-w-2xl!'
     >
       {isOpen && (
         <UpdaterContent

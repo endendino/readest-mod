@@ -1,4 +1,4 @@
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+import { browserFetch as tauriFetch } from '@/services/webBrowser/browserFetch';
 import { isTauriAppPlatform } from '@/services/environment';
 import { imageFetchHeaders } from './httpHeaders';
 import type { EpubImage } from './types';
@@ -11,6 +11,7 @@ import type { EpubImage } from './types';
 // paywalled / member-only CDN hosts — without that, an authenticated
 // Substack image returns a placeholder. In Tauri we also fold in the
 // full image-fetch header set (UA + Sec-Ch-Ua + Sec-Fetch-* + Referer)
+// and use the browser's native cookie store, including HttpOnly cookies,
 // so CDNs that gate images on the browser shape — NYT, WSJ, paywalled
 // CDNs — cooperate.
 const httpFetch = (
@@ -19,7 +20,10 @@ const httpFetch = (
   init?: RequestInit,
   useProxy = false,
 ): Promise<Response> => {
-  if (isTauriAppPlatform()) {
+  // `data:` URLs carry their bytes inline — the native fetch decodes them
+  // without touching the network, the proxy, or the Rust client.
+  const isDataUrl = url.startsWith('data:');
+  if (isTauriAppPlatform() && !isDataUrl) {
     const baseHeaders = imageFetchHeaders(referer);
     const headers = new Headers(init?.headers);
     for (const [k, v] of Object.entries(baseHeaders)) {
@@ -27,11 +31,11 @@ const httpFetch = (
     }
     return tauriFetch(url, { ...init, headers });
   }
-  // Plain web build: cross-origin image fetches are CORS-blocked, so route
-  // through the same-origin server-side image proxy (see /api/img). The
+  // FORK: plain web build — cross-origin image fetches are CORS-blocked, so
+  // route through the same-origin server-side image proxy (see /api/img). The
   // browser-extension service worker has host_permissions and calls this
   // with useProxy=false, hitting the network directly with cookies.
-  if (useProxy) {
+  if (useProxy && !isDataUrl) {
     const proxied = `/api/img?url=${encodeURIComponent(url)}${
       referer ? `&referer=${encodeURIComponent(referer)}` : ''
     }`;
@@ -196,6 +200,40 @@ function mimeFromContentType(contentType: string | null, url: string): string {
   return 'application/octet-stream';
 }
 
+/**
+ * Whether an asset URL is worth a fetch.
+ *
+ * `http(s):` and `data:` always are. `file:` is the interesting case: an
+ * extension page holding "Allow access to file URLs" *can* read local
+ * files, which is what lets a page saved with a `<name>_files/` folder keep
+ * its images instead of degrading to alt text. That capability is also a
+ * disclosure risk, since the EPUB we build gets uploaded, so it is fenced
+ * twice:
+ *
+ *   1. The page being clipped must itself be local. A remote page pointing
+ *      an `<img>` at `file:///…` must never cause a disk read.
+ *   2. The asset must live under the page's own directory. `new URL` has
+ *      already normalized away any `..`, so a prefix test is sufficient to
+ *      keep a crafted local page from harvesting the rest of the disk. A
+ *      page sitting at the filesystem root gets nothing — its "directory"
+ *      is `/`, which would otherwise mean everything.
+ */
+function isFetchableAssetUrl(url: string, pageUrl: string): boolean {
+  if (/^(https?|data):/i.test(url)) return true;
+  if (!/^file:/i.test(url)) return false;
+  let page: URL;
+  let asset: URL;
+  try {
+    page = new URL(pageUrl);
+    asset = new URL(url);
+  } catch {
+    return false;
+  }
+  if (page.protocol !== 'file:' || asset.protocol !== 'file:') return false;
+  const dir = page.pathname.slice(0, page.pathname.lastIndexOf('/') + 1);
+  return dir.length > 1 && asset.pathname.startsWith(dir);
+}
+
 interface FetchedAsset {
   url: string;
   path: string;
@@ -207,8 +245,12 @@ async function fetchAsset(
   url: string,
   referer: string | null,
   useProxy: boolean,
+  signal?: AbortSignal,
 ): Promise<FetchedAsset | null> {
+  signal?.throwIfAborted();
   const ac = new AbortController();
+  const onAbort = () => ac.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
     const res = await httpFetch(url, referer, { signal: ac.signal, redirect: 'follow' }, useProxy);
@@ -224,6 +266,7 @@ async function fetchAsset(
     return { url, path, bytes, mime };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -250,9 +293,12 @@ export interface BundleAssetsResult {
 export async function bundleAssets(
   contentHtml: string,
   pageUrl: string,
-  opts: { useProxy?: boolean } = {},
+  options: { maxBytes?: number; signal?: AbortSignal; useProxy?: boolean } = {},
 ): Promise<BundleAssetsResult> {
-  const useProxy = opts.useProxy ?? false;
+  // FORK: `useProxy` routes web-build image fetches through /api/img.
+  const useProxy = options.useProxy ?? false;
+  const maxBytes = Math.min(options.maxBytes ?? MAX_TOTAL_ASSET_BYTES, MAX_TOTAL_ASSET_BYTES);
+  options.signal?.throwIfAborted();
   const doc = new DOMParser().parseFromString(`<div id="root">${contentHtml}</div>`, 'text/html');
   const root = doc.getElementById('root');
   if (!root) return { html: contentHtml, images: [], missing: 0 };
@@ -334,33 +380,62 @@ export async function bundleAssets(
   // Bounded-concurrency fetch loop. `MAX_CONCURRENCY` workers pull from a
   // shared cursor so we never hammer a single origin with N requests. Each
   // fetch owns its own timeout — see `fetchAsset`.
+  //
+  // Results are parked by index rather than committed as they land, because
+  // the size budget below has to decide which images to drop and that
+  // decision must not depend on which fetch happened to win the race. A
+  // clip has to be reproducible: the same page with the same assets must
+  // produce the same EPUB bytes on every device, every time.
+  const settled = new Array<FetchedAsset | null>(uniqueUrls.length).fill(null);
+  const resolved = new Array<boolean>(uniqueUrls.length).fill(false);
+
+  // Bytes owned by the unbroken run of assets already resolved from the front
+  // of the document. Consulted only to stop dispatching once the budget is
+  // provably spent, so an image-heavy page does not download megabytes it is
+  // going to discard. The authoritative accounting is the in-order pass below,
+  // so this staying approximate cannot affect the output.
+  let prefixCursor = 0;
+  let prefixBytes = 0;
+  const settledPrefixBytes = (): number => {
+    while (prefixCursor < resolved.length && resolved[prefixCursor]) {
+      prefixBytes += settled[prefixCursor]?.bytes.byteLength ?? 0;
+      prefixCursor++;
+    }
+    return prefixBytes;
+  };
+
   let cursor = 0;
   const worker = async () => {
     while (cursor < uniqueUrls.length) {
+      options.signal?.throwIfAborted();
       const i = cursor++;
       const url = uniqueUrls[i]!;
-      if (totalBytes >= MAX_TOTAL_ASSET_BYTES) {
-        missing++;
-        continue;
-      }
-      try {
-        const asset = await fetchAsset(url, pageUrl, useProxy);
-        if (asset && totalBytes + asset.bytes.byteLength <= MAX_TOTAL_ASSET_BYTES) {
-          fetched.set(url, asset);
-          totalBytes += asset.bytes.byteLength;
-        } else {
-          missing++;
+      if (isFetchableAssetUrl(url, pageUrl) && settledPrefixBytes() < maxBytes) {
+        try {
+          settled[i] = await fetchAsset(url, pageUrl, useProxy, options.signal);
+        } catch (err) {
+          console.warn('[clip/bundle] image fetch failed', {
+            url,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
-      } catch (err) {
-        missing++;
-        console.warn('[clip/bundle] image fetch failed', {
-          url,
-          error: err instanceof Error ? err.message : String(err),
-        });
       }
+      resolved[i] = true;
     }
   };
   await Promise.all(Array.from({ length: MAX_CONCURRENCY }, worker));
+
+  options.signal?.throwIfAborted();
+  // Apply the budget strictly in document order.
+  for (let i = 0; i < uniqueUrls.length; i++) {
+    const asset = settled[i];
+    if (!asset || totalBytes + asset.bytes.byteLength > maxBytes) {
+      missing++;
+      continue;
+    }
+    fetched.set(uniqueUrls[i]!, asset);
+    totalBytes += asset.bytes.byteLength;
+  }
   console.log('[clip/bundle] done', {
     fetched: fetched.size,
     missing,

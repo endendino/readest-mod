@@ -59,7 +59,11 @@ const TranslatorPopup: React.FC<TranslatorPopupProps> = ({
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { translate, translators } = useTranslator({
+  // The provider's own failure reason (HTTP status, upstream status code,
+  // network error), shown under the generic message so a failure can be
+  // diagnosed from the popup itself (#5823).
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const { translate, translator, translators } = useTranslator({
     provider,
     sourceLang,
     targetLang,
@@ -101,6 +105,7 @@ const TranslatorPopup: React.FC<TranslatorPopupProps> = ({
     setLoading(true);
     const fetchTranslation = async () => {
       setError(null);
+      setErrorDetail(null);
       setTranslation(null);
 
       try {
@@ -119,10 +124,13 @@ const TranslatorPopup: React.FC<TranslatorPopupProps> = ({
         }
       } catch (err) {
         console.error(err);
-        if (!token) {
+        // Only blame a missing login when this provider actually needs one;
+        // Azure/Google/Yandex run without a Readest account in the app.
+        if (translator?.authRequired && !token) {
           setError(_('Unable to fetch the translation. Please log in first and try again.'));
         } else {
           setError(_('Unable to fetch the translation. Try again later.'));
+          setErrorDetail(err instanceof Error ? err.message : String(err));
         }
       } finally {
         setLoading(false);
@@ -141,15 +149,21 @@ const TranslatorPopup: React.FC<TranslatorPopupProps> = ({
         minHeight={popupHeight}
         maxHeight={720}
         position={position}
-        className='not-eink:text-white grid h-full select-text grid-rows-[1fr,auto,1fr] bg-gray-600'
-        triangleClassName='text-gray-600'
+        // Tracks are space-separated (`_` in a Tailwind arbitrary value).
+        // Commas here emitted `grid-template-rows:1fr,auto,1fr,auto`, which the
+        // browser discards, leaving four implicit auto rows that sized to their
+        // content and pushed the translated pane and the provider footer past
+        // the popup's own max height with nothing scrollable to reach them.
+        // `minmax(0,...)` rather than a bare `1fr`: a bare fr floors at
+        // min-content, so the rows would refuse to shrink inside the capped
+        // popup and overflow it again.
+        className='grid h-full select-text grid-rows-[minmax(0,1fr)_auto_minmax(0,1fr)_auto]'
         onDismiss={onDismiss}
       >
         <div className='overflow-y-auto p-4 font-sans'>
           <div className='mb-2 flex items-center justify-between'>
-            <h1 className='text-sm font-normal'>{_('Original Text')}</h1>
+            <h1 className='text-sm font-medium'>{_('Original Text')}</h1>
             <Select
-              className='not-eink:bg-gray-600 not-eink:text-white eink:bg-base-100'
               value={sourceLang}
               onChange={handleSourceLangChange}
               options={[
@@ -167,16 +181,15 @@ const TranslatorPopup: React.FC<TranslatorPopupProps> = ({
               ]}
             />
           </div>
-          <p className='not-eink:text-white/90 text-base'>{text}</p>
+          <p className='text-base'>{text}</p>
         </div>
 
-        <div className='mx-4 flex-shrink-0 border-t border-gray-500/30'></div>
+        <div className='mx-4 shrink-0 border-t border-base-content/20'></div>
 
-        <div className='overflow-y-auto px-4 pb-8 pt-4 font-sans'>
+        <div className='overflow-y-auto p-4 font-sans'>
           <div className='mb-2 flex items-center justify-between'>
-            <h2 className='text-sm font-normal'>{_('Translated Text')}</h2>
+            <h2 className='text-sm font-medium'>{_('Translated Text')}</h2>
             <Select
-              className='not-eink:bg-gray-600 not-eink:text-white eink:bg-base-100'
               value={targetLang}
               onChange={handleTargetLangChange}
               options={[
@@ -188,21 +201,26 @@ const TranslatorPopup: React.FC<TranslatorPopupProps> = ({
             />
           </div>
           {loading ? (
-            <p className='text-base italic text-gray-500'>{_('Loading...')}</p>
+            <p className='text-base-content/80 italic'>{_('Loading...')}</p>
           ) : (
             <div>
               {error ? (
-                <p className='text-base text-red-600'>{error}</p>
+                <div>
+                  <p className='text-base text-red-600'>{error}</p>
+                  {errorDetail && (
+                    <p className='mt-1 break-words text-xs text-base-content/60'>{errorDetail}</p>
+                  )}
+                </div>
               ) : (
-                <p className='not-eink:text-white/90 text-base'>
-                  {translation || _('No translation available.')}
-                </p>
+                <p className='text-base'>{translation || _('No translation available.')}</p>
               )}
             </div>
           )}
         </div>
-        <div className='absolute bottom-0 flex h-8 w-full items-center justify-between px-4'>
-          <div className='line-clamp-1 text-xs opacity-60'>
+        {/* No top border or tinted fill: the footer reads as part of the popup
+            surface, so its provider select can sit flush on the same color. */}
+        <div className='flex shrink-0 items-center justify-between gap-2 rounded-b-lg px-4 py-2'>
+          <div className='line-clamp-1 text-xs text-base-content/60'>
             {provider &&
               !loading &&
               !error &&
@@ -211,7 +229,6 @@ const TranslatorPopup: React.FC<TranslatorPopupProps> = ({
               })}
           </div>
           <Select
-            className='not-eink:bg-gray-600 not-eink:text-white eink:bg-base-100'
             value={provider}
             onChange={handleProviderChange}
             options={providers.map(({ name: value, label, disabled }) => ({

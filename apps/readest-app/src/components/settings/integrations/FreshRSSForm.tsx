@@ -83,7 +83,7 @@ const FreshRSSForm: React.FC<FreshRSSFormProps> = ({ onBack }) => {
             disabled={isTesting}
             className={clsx(
               'btn btn-primary h-10 min-h-10 rounded-lg border-0 px-5 text-sm font-medium',
-              'focus-visible:ring-primary/40 focus-visible:outline-none focus-visible:ring-2',
+              'focus-visible:ring-primary/40 focus-visible:outline-hidden focus-visible:ring-2',
               isTesting && 'opacity-60',
             )}
           >
@@ -119,7 +119,7 @@ const FreshRSSForm: React.FC<FreshRSSFormProps> = ({ onBack }) => {
                   <span className='min-w-0 truncate' dir='auto'>
                     {f.title}
                   </span>
-                  <span className='text-base-content/60 flex-shrink-0'>{f.unreadCount}</span>
+                  <span className='text-base-content/60 shrink-0'>{f.unreadCount}</span>
                 </div>
               ))}
               {result.feeds.length === 0 && (
@@ -157,7 +157,7 @@ const FreshRSSForm: React.FC<FreshRSSFormProps> = ({ onBack }) => {
               <SettingLabel>{_('Obsidian clip folder')}</SettingLabel>
               <input
                 type='text'
-                className='input input-bordered eink-bordered h-10 w-full text-sm focus:outline-none'
+                className='input eink-bordered h-10 w-full text-sm focus:outline-hidden'
                 spellCheck='false'
                 autoCapitalize='off'
                 placeholder='Obsidian/Readest'

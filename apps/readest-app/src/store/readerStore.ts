@@ -12,6 +12,7 @@ import {
 import { Insets } from '@/types/misc';
 import { EnvConfigType } from '@/services/environment';
 import { FoliateView } from '@/types/view';
+import { isAbsEbook } from '@/utils/audiobook';
 import { DocumentLoader, TOCItem } from '@/libs/document';
 import {
   isPseStreamFileName,
@@ -21,7 +22,7 @@ import {
 import type { FileSystem } from '@/types/system';
 import { isFeedBookUrl, parseFeedBookUrl } from '@/services/rss/feedBookUrl';
 import { openFeedBookDoc } from '@/services/rss/feedReader';
-import { BOOK_NAV_VERSION, computeBookNav, hydrateBookNav, updateToc } from '@/services/nav';
+import { computeBookNav, hydrateBookNav, isBookNavCacheCurrent, updateToc } from '@/services/nav';
 import { formatTitle, getMetadataHash, getPrimaryLanguage } from '@/utils/book';
 import { getBaseFilename } from '@/utils/path';
 import { SUPPORTED_LANGNAMES } from '@/services/constants';
@@ -148,6 +149,14 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
       delete viewStates[key];
       return { viewStates };
     });
+    // A streamed ABS ebook reads through a RemoteFile that authenticates with
+    // a short-lived access token, so its cached BookDoc must not outlive the
+    // last open view: the next open resolves the stream afresh against the
+    // store's current token. Local books keep their cache for instant reopens.
+    const id = key.split('-')[0]!;
+    if (Object.keys(get().viewStates).some((k) => k.split('-')[0] === id)) return;
+    const book = useLibraryStore.getState().getBookByHash(id);
+    if (book && isAbsEbook(book)) useBookDataStore.getState().clearBookData(id);
   },
   getViewState: (key: string) => get().viewStates[key] || null,
   initViewState: async (
@@ -246,7 +255,7 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
       // Load cached book navigation (TOC + section fragments) or compute and persist.
       if (book.format === 'EPUB' && bookDoc.rendition?.layout !== 'pre-paginated') {
         const cachedNav = await appService.loadBookNav(book);
-        if (cachedNav?.version === BOOK_NAV_VERSION && process.env.NODE_ENV === 'production') {
+        if (isBookNavCacheCurrent(cachedNav) && process.env.NODE_ENV === 'production') {
           hydrateBookNav(bookDoc, cachedNav);
         } else {
           const freshNav = await computeBookNav(bookDoc);
@@ -292,7 +301,11 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
       }
       // TODO: uncomment this when we can ensure metaHash is correctly generated for all books
       // book.metaHash = book.metaHash ?? getMetadataHash(bookDoc.metadata);
-      book.metaHash = getMetadataHash(bookDoc.metadata);
+      // PDF metaHash is salted with the original import filename (issue #5411),
+      // which is lost after import — keep the value stamped at import time.
+      if (book.format !== 'PDF' || !book.metaHash) {
+        book.metaHash = getMetadataHash(bookDoc.metadata);
+      }
 
       const isFixedLayout =
         bookDoc.rendition?.layout === 'pre-paginated' || FIXED_LAYOUT_FORMATS.has(book.format);
@@ -566,19 +579,16 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
     })),
 
   recreateViewer: (envConfig: EnvConfigType, key: string) => {
+    if (!key || get().viewStates[key]?.key !== key) return;
     const id = key.split('-')[0]!;
-    get()
-      .initViewState(envConfig, id, key, true, true)
-      .then(() => {
-        set((state) => ({
-          viewStates: {
-            ...state.viewStates,
-            [key]: {
-              ...state.viewStates[key]!,
-              viewerKey: `${key}-${uniqueId()}`,
-            },
-          },
-        }));
-      });
+    // `initViewState` already mints a fresh `viewerKey` when the reload lands,
+    // which is what remounts <FoliateViewer>. Minting a second one here
+    // remounted it twice: the abandoned first mount kept running its async
+    // `openBook()` and registered another `data` transform listener on the
+    // *same* reloaded bookDoc, so every resource was piped through the
+    // transform chain twice. A twice-transformed stylesheet lost all its
+    // font-family declarations, and the book fell back to the app font
+    // (readest#5277).
+    void get().initViewState(envConfig, id, key, true, true);
   },
 }));

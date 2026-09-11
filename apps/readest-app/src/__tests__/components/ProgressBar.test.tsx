@@ -1,4 +1,4 @@
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ProgressBar from '@/app/reader/components/ProgressBar';
@@ -168,6 +168,21 @@ describe('ProgressBar — decorative footer is not focusable', () => {
     expect(progressInfo).not.toBeNull();
     expect(progressInfo!.hasAttribute('tabindex')).toBe(false);
   });
+
+  it('stays above the reading ruler filter layer', () => {
+    currentViewSettings = {
+      ...baseSettings,
+    } as ViewSettings;
+    currentProgress = makeProgress(2, 5);
+    currentBookData = { isFixedLayout: false };
+    currentRenderer = { page: 1, pages: 4 };
+
+    const { container } = renderProgressBar();
+
+    // ReadingRuler uses z-[5]. Reader chrome must paint above it so the
+    // backdrop filter cannot blur the footer when the ruler reaches the bottom.
+    expect(container.querySelector('.progressinfo')?.classList.contains('z-10')).toBe(true);
+  });
 });
 
 describe('ProgressBar — sticky progress bar', () => {
@@ -228,12 +243,13 @@ describe('ProgressBar — sticky progress bar', () => {
   });
 });
 
-describe('ProgressBar — display-only footer overlay', () => {
-  // The footer overlay is stacked above the book but is purely informational:
-  // it must never intercept taps or text selection over book content, and it
-  // exposes no clickable tap targets. In scrolled mode (no reserved band) each
-  // info segment carries its own shrink-wrapped pill backdrop so it stays
-  // legible floating over the text instead of a full-width bar.
+describe('ProgressBar — footer overlay pointer contract', () => {
+  // The full-width overlay container stays passive so taps and text selection
+  // over book content pass through; only the strip (band modes) or the pills
+  // themselves (scrolled mode) are tap targets — see the tap-to-toggle suite.
+  // In scrolled mode (no reserved band) each info segment carries its own
+  // shrink-wrapped pill backdrop so it stays legible floating over the text
+  // instead of a full-width bar.
   const readerSettings = (overrides?: Partial<ViewSettings>) => {
     currentViewSettings = {
       ...baseSettings,
@@ -253,18 +269,6 @@ describe('ProgressBar — display-only footer overlay', () => {
     const progressInfo = container.querySelector('.progressinfo') as HTMLElement;
     expect(progressInfo.classList.contains('pointer-events-none')).toBe(true);
     expect(progressInfo.classList.contains('pointer-events-auto')).toBe(false);
-  });
-
-  it('exposes no interactive targets (display-only, no tap-to-toggle)', () => {
-    readerSettings({ showRemainingPages: true });
-
-    const { container } = renderProgressBar();
-
-    expect(container.querySelector('.pointer-events-auto')).toBeNull();
-    expect(container.querySelector('.cursor-pointer')).toBeNull();
-    expect(container.querySelector('.progress-restore-pad')).toBeNull();
-    // No showFooter write ever originates from tapping the footer.
-    expect(saveViewSettings.mock.calls.some((args) => args[2] === 'showFooter')).toBe(false);
   });
 
   it('wraps each info segment in its own pill backdrop in scrolled mode', () => {
@@ -287,6 +291,121 @@ describe('ProgressBar — display-only footer overlay', () => {
     const { container } = renderProgressBar();
 
     expect(container.querySelector('.progress-pill')).toBeNull();
+  });
+});
+
+describe('ProgressBar — tap to toggle visibility (#5293)', () => {
+  // Tapping the footer toggles the info's visibility without touching layout
+  // or settings: the reserved band stays, showFooter never changes, and the
+  // state is ephemeral — a fresh mount (book open) starts visible again.
+  // Where the strip sits on reserved margin space (paginated band, sticky
+  // bar, vertical side column) the whole strip is the tap target; in scrolled
+  // mode the info floats over book text, so only the pills are tappable and
+  // the strip keeps letting taps and text selection through.
+  const readerSettings = (overrides?: Partial<ViewSettings>) => {
+    currentViewSettings = {
+      ...baseSettings,
+      ...overrides,
+    } as ViewSettings;
+    currentProgress = makeProgress(2, 5);
+    currentBookData = { isFixedLayout: false };
+    currentRenderer = { page: 1, pages: 4 };
+  };
+
+  it('toggles the info visibility when the strip is tapped in paginated mode', () => {
+    readerSettings({ showRemainingPages: true });
+
+    const { container } = renderProgressBar();
+
+    const strip = container.querySelector('.progress-strip') as HTMLElement;
+    expect(strip).not.toBeNull();
+    expect(strip.classList.contains('pointer-events-auto')).toBe(true);
+    expect(strip.classList.contains('opacity-0')).toBe(false);
+
+    fireEvent.click(strip);
+    expect(strip.classList.contains('opacity-0')).toBe(true);
+    // The strip stays tappable while hidden so the same tap brings it back.
+    expect(strip.classList.contains('pointer-events-auto')).toBe(true);
+
+    fireEvent.click(strip);
+    expect(strip.classList.contains('opacity-0')).toBe(false);
+  });
+
+  it('never writes settings from the tap (visibility is ephemeral)', () => {
+    readerSettings({ showRemainingPages: true });
+
+    const { container } = renderProgressBar();
+
+    fireEvent.click(container.querySelector('.progress-strip') as HTMLElement);
+    expect(saveViewSettings).not.toHaveBeenCalled();
+  });
+
+  it('starts visible again on a fresh mount (state resets with the book)', () => {
+    readerSettings({ showRemainingPages: true });
+
+    const first = renderProgressBar();
+    fireEvent.click(first.container.querySelector('.progress-strip') as HTMLElement);
+    expect(
+      (first.container.querySelector('.progress-strip') as HTMLElement).classList.contains(
+        'opacity-0',
+      ),
+    ).toBe(true);
+    first.unmount();
+
+    const second = renderProgressBar();
+    expect(
+      (second.container.querySelector('.progress-strip') as HTMLElement).classList.contains(
+        'opacity-0',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the strip passive in scrolled mode — the pills are the tap targets', () => {
+    readerSettings({ scrolled: true, showRemainingPages: true });
+
+    const { container } = renderProgressBar();
+
+    const strip = container.querySelector('.progress-strip') as HTMLElement;
+    expect(strip.classList.contains('pointer-events-auto')).toBe(false);
+
+    const pill = container.querySelector('.progress-pill') as HTMLElement;
+    expect(pill.classList.contains('pointer-events-auto')).toBe(true);
+
+    fireEvent.click(pill);
+    expect(strip.classList.contains('opacity-0')).toBe(true);
+  });
+
+  it('makes the whole strip tappable in scrolled mode when the sticky bar reserves the band', () => {
+    readerSettings({ scrolled: true, showStickyProgressBar: true });
+
+    const { container } = renderProgressBar();
+
+    const strip = container.querySelector('.progress-strip') as HTMLElement;
+    expect(strip.classList.contains('pointer-events-auto')).toBe(true);
+  });
+
+  it('makes the side column tappable in vertical mode', () => {
+    readerSettings({ vertical: true, showRemainingPages: true });
+
+    const { container } = renderProgressBar();
+
+    const strip = container.querySelector('.progress-strip') as HTMLElement;
+    expect(strip.classList.contains('pointer-events-auto')).toBe(true);
+  });
+
+  it('exposes no tap target when the footer has nothing to show', () => {
+    readerSettings({
+      showProgressInfo: false,
+      showRemainingTime: false,
+      showRemainingPages: false,
+      showCurrentTime: false,
+      showCurrentBatteryStatus: false,
+      showStickyProgressBar: false,
+    });
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.pointer-events-auto')).toBeNull();
   });
 });
 
@@ -348,5 +467,49 @@ describe('ProgressBar — contrast against the page (#4901)', () => {
 
     const info = container.querySelector('.progressinfo') as HTMLElement;
     expect(info.classList.contains('mix-blend-difference')).toBe(false);
+  });
+
+  // #5342: scrolled mode gives every segment its own bg-base-100/85 pill, and
+  // the blend applies to the container as a group -- a white pill differenced
+  // against the white PDF page turns pure black. The pill already guarantees
+  // legibility, so the blend must stand down whenever pills are on.
+  it('drops the blend for a fixed-layout book when the pills provide the backdrop', () => {
+    currentViewSettings = {
+      ...baseSettings,
+      isEink: false,
+      scrolled: true,
+      showRemainingPages: true,
+      showRemainingTime: false,
+    } as ViewSettings;
+    currentProgress = makeProgress(2, 5);
+    currentBookData = { isFixedLayout: true };
+    currentRenderer = { page: 1, pages: 4 };
+
+    const { container } = renderProgressBar();
+
+    const info = container.querySelector('.progressinfo') as HTMLElement;
+    expect(container.querySelector('.progress-pill')).not.toBeNull();
+    expect(info.classList.contains('mix-blend-difference')).toBe(false);
+    expect(info.classList.contains('text-base-content')).toBe(true);
+  });
+
+  it('keeps the blend for a fixed-layout book in scrolled mode when the sticky bar replaces the pills', () => {
+    currentViewSettings = {
+      ...baseSettings,
+      isEink: false,
+      scrolled: true,
+      showStickyProgressBar: true,
+      showRemainingPages: true,
+      showRemainingTime: false,
+    } as ViewSettings;
+    currentProgress = makeProgress(2, 5);
+    currentBookData = { isFixedLayout: true };
+    currentRenderer = { page: 1, pages: 4 };
+
+    const { container } = renderProgressBar();
+
+    const info = container.querySelector('.progressinfo') as HTMLElement;
+    expect(container.querySelector('.progress-pill')).toBeNull();
+    expect(info.classList.contains('mix-blend-difference')).toBe(true);
   });
 });

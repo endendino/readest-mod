@@ -151,6 +151,35 @@ describe('TTSMediaBridge', () => {
     expect(controller.start).toHaveBeenCalled();
   });
 
+  // Android relays a synthetic media-session-pause on audio-focus loss. An
+  // audiobook's audio plays through a WebView <audio> element, for which
+  // Chromium requests audio focus in the app's own uid; the media service
+  // requesting focus as well loses it to that request and relays the loss as a
+  // pause, killing playback ~300ms after it started. Sessions whose audio the
+  // app renders itself (TTS, native narration) keep the service as the owner.
+  test('the activation payload carries who owns audio focus', async () => {
+    class RecordingTauriSession extends TauriMediaSession {
+      activations: { active: boolean; ownsAudioFocus?: boolean }[] = [];
+      override setActionHandler() {}
+      override async setActive(state: { active: boolean; ownsAudioFocus?: boolean }) {
+        this.activations.push(state);
+      }
+      override async updateMetadata() {}
+      override async updatePlaybackState() {}
+    }
+    const tauriSession = new RecordingTauriSession();
+    bridge = new TTSMediaBridge(() => tauriSession as unknown as MediaSession);
+
+    await bridge.bind(controller as unknown as TTSController, meta());
+    expect(tauriSession.activations[0]!.ownsAudioFocus).toBe(true);
+
+    await bridge.bind(
+      new FakeController() as unknown as TTSController,
+      meta({ ownsAudioFocus: false }),
+    );
+    expect(tauriSession.activations.at(-1)!.ownsAudioFocus).toBe(false);
+  });
+
   test('speak-mark events update metadata and clamped position state headless', async () => {
     await bind();
     controller.getPlaybackInfo.mockReturnValue({ position: 90, duration: 60, measuredFraction: 1 });
@@ -353,6 +382,30 @@ describe('TTSMediaBridge', () => {
     // Metadata still reflects the last known chapter, no crash, no blanking.
     expect(first).toBeTruthy();
     expect(bridge.isBound).toBe(true);
+  });
+
+  // The Update Frequency setting is the only thing choosing what the lock
+  // screen names. Hardcoding one shape here is how it silently went dead.
+  test('metadataMode drives what Now Playing names', async () => {
+    await bridge.bind(controller as unknown as TTSController, {
+      ...meta(),
+      getSectionLabel: () => 'Chapter I',
+    });
+    controller.emitMark('The queen without love walked on.', '0');
+    await new Promise((r) => setTimeout(r, 0));
+    const sentence = fake.metadata as FakeMediaMetadata;
+    expect(sentence.title).toBe('The queen without love walked on.');
+    expect(sentence.artist).toBe('Chapter I');
+
+    await bridge.bind(controller as unknown as TTSController, {
+      ...meta({ metadataMode: 'chapter' as const }),
+      getSectionLabel: () => 'Chapter I',
+    });
+    controller.emitMark('The queen without love walked on.', '0');
+    await new Promise((r) => setTimeout(r, 0));
+    const chapter = fake.metadata as FakeMediaMetadata;
+    expect(chapter.title).toBe('Chapter I');
+    expect(chapter.artist).toBe('Carroll');
   });
 
   test('bind reports an active CarPlay state', async () => {

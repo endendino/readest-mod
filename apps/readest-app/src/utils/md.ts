@@ -8,7 +8,9 @@ import {
   buildChapterFootnotes,
   expandInlineFootnotes,
   extractFootnoteDefs,
+  normalizeFootnoteDefinitionIndent,
 } from './mdFootnotes';
+import { frontmatterToMetadata, parseFrontmatter } from './mdFrontmatter';
 import { sanitizeHtml } from './sanitize';
 
 // Render a standalone Markdown (.md) file into an in-memory foliate-js book at
@@ -24,7 +26,7 @@ const XHTML_NS = 'http://www.w3.org/1999/xhtml';
 // annotation note renderer and the export dialog, and must not gain footnote
 // parsing as a side effect.
 const markdown = new Marked({ gfm: true }).use(markedFootnote({ prefixId: FOOTNOTE_PREFIX_ID }), {
-  hooks: { preprocess: expandInlineFootnotes },
+  hooks: { preprocess: (src) => expandInlineFootnotes(normalizeFootnoteDefinitionIndent(src)) },
 });
 
 // Minimal defaults so code blocks wrap inside the paginated column (long lines
@@ -48,28 +50,6 @@ const wrapXhtml = (inner: string): string =>
   `<html xmlns="${XHTML_NS}"><head><meta charset="utf-8"/>` +
   `<style>${MD_STYLE}</style></head><body>${inner}</body></html>`;
 
-interface Frontmatter {
-  title?: string;
-  author?: string;
-}
-
-// Strip a leading YAML frontmatter block so it does not render as a stray
-// `<hr>` + text, and lift `title` / `author` from it.
-const stripFrontmatter = (text: string): { body: string; meta: Frontmatter } => {
-  const match = text.match(/^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/);
-  if (!match) return { body: text, meta: {} };
-  const meta: Frontmatter = {};
-  for (const line of match[1]!.split(/\r?\n/)) {
-    const kv = line.match(/^([A-Za-z][\w-]*)\s*:\s*(.*)$/);
-    if (!kv) continue;
-    const key = kv[1]!.toLowerCase();
-    const value = kv[2]!.trim().replace(/^['"]|['"]$/g, '');
-    if (key === 'title') meta.title = value;
-    else if (key === 'author') meta.author = value;
-  }
-  return { body: text.slice(match[0]!.length), meta };
-};
-
 const slugify = (text: string): string =>
   text
     .toLowerCase()
@@ -86,11 +66,18 @@ interface TocNode {
   subitems?: TocNode[];
 }
 
-type MarkdownSection = SectionItem & { load: () => string };
+type MarkdownSection = SectionItem & {
+  load: () => string;
+  loadContent: () => Promise<string>;
+  unload: () => void;
+};
 
 export async function makeMarkdownBook(file: File): Promise<BookDoc> {
   const text = await file.text();
-  const { body, meta } = stripFrontmatter(text);
+  // The frontmatter block is stripped before rendering so it does not show up
+  // as a stray `<hr>` + text; its keys become the book's metadata (issue #5279).
+  const { body, fields } = parseFrontmatter(text);
+  const { metadata: frontmatter, coverBlob } = frontmatterToMetadata(fields);
   const rawHtml = await markdown.parse(body);
   const safeHtml = sanitizeHtml(rawHtml);
   const docBody = new DOMParser().parseFromString(safeHtml, 'text/html').body;
@@ -114,7 +101,9 @@ export async function makeMarkdownBook(file: File): Promise<BookDoc> {
     usedIds.add(id);
     return id;
   };
-  const headingEls = Array.from(docBody.querySelectorAll('h1, h2, h3'));
+  // All six Markdown heading levels, so the TOC mirrors the document outline in
+  // full and deep headings stay linkable by anchor (issue #5357).
+  const headingEls = Array.from(docBody.querySelectorAll('h1, h2, h3, h4, h5, h6'));
   for (const h of headingEls) {
     if (!h.id) h.id = uniqueId(slugify(h.textContent ?? ''));
   }
@@ -187,6 +176,42 @@ export async function makeMarkdownBook(file: File): Promise<BookDoc> {
     }));
   const toc = prune(root);
 
+  // The same transform pipeline EPUB/MOBI content goes through: the reader
+  // attaches its content transformers (proofread, simplecc, punctuation, ...)
+  // to `book.transformTarget`, and the paginator renders `loadContent()` via
+  // srcdoc when it is defined. Transformed content is cached per section and
+  // invalidated by unload() (the paginator unloads a section whenever its view
+  // is destroyed, e.g. on the viewer recreation a proofread rule change
+  // triggers), so rule changes show up on the next load. createDocument()
+  // stays raw, mirroring EPUB: TTS replays this same pipeline itself, and a
+  // pre-transformed document would double-apply the transformers.
+  const transformTarget = new EventTarget();
+  const transformed: (string | undefined)[] = new Array(xhtml.length).fill(undefined);
+  const transformSection = async (index: number): Promise<string> => {
+    const cached = transformed[index];
+    if (cached !== undefined) return cached;
+    const str = xhtml[index]!;
+    let result = str;
+    try {
+      const detail: { data: string | Promise<string>; type: string } = {
+        data: str,
+        type: 'application/xhtml+xml',
+      };
+      // Readonly, mirroring foliate's Loader.createURL dispatch. Selection
+      // scoped proofread rules compare their TOC-style sectionHref
+      // ("<index>#<anchor>") against this name via split('#')[0].
+      Object.defineProperty(detail, 'name', { value: String(index) });
+      transformTarget.dispatchEvent(new CustomEvent('data', { detail }));
+      const out = await detail.data;
+      // '' is the reader transform handler's error fallback.
+      if (typeof out === 'string' && out) result = out;
+    } catch {
+      // Keep the raw section on any transform failure.
+    }
+    transformed[index] = result;
+    return result;
+  };
+
   const urls: (string | undefined)[] = new Array(xhtml.length).fill(undefined);
   const sections: MarkdownSection[] = xhtml.map((str, index) => ({
     id: String(index),
@@ -204,26 +229,38 @@ export async function makeMarkdownBook(file: File): Promise<BookDoc> {
       }
       return urls[index]!;
     },
+    loadContent: () => transformSection(index),
+    unload: () => {
+      transformed[index] = undefined;
+    },
     loadText: async () => str,
     createDocument: async () => new DOMParser().parseFromString(str, 'application/xhtml+xml'),
   }));
 
-  const title =
-    meta.title?.trim() ||
-    (headingEls.find((h) => h.tagName === 'H1')?.textContent ?? '').trim() ||
-    file.name.replace(/\.(?:md|markdown)$/i, '');
+  // The filename is the title unless frontmatter — an explicit metadata block —
+  // says otherwise. A heading is body content: preferring the first <h1> made
+  // every note whose first line is a heading import under that heading instead
+  // of its own name, and the <h1> was matched by tag name rather than position,
+  // so one buried mid-document could win even when the file opened with an <h2>.
+  const title = frontmatter.title || file.name.replace(/\.(?:md|markdown)$/i, '');
 
   const book = {
     metadata: {
-      title,
-      author: meta.author?.trim() ?? '',
+      author: '',
       language: 'en',
-      identifier: file.name,
+      ...frontmatter,
+      title,
+      // A frontmatter identifier — an explicit one, else the ISBN — makes the
+      // same book import to the same `metaHash` from any copy of the file. With
+      // neither, the filename stays the identifier, so books already in the
+      // library keep the hash they were imported under.
+      identifier: frontmatter.identifier || frontmatter.isbn || file.name,
     },
     rendition: { layout: 'reflowable' as const },
     dir: 'ltr',
     toc,
     sections,
+    transformTarget,
     splitTOCHref: (href: string): string[] => (href ? href.split('#') : []),
     getTOCFragment: (doc: Document, id: string): Element | null => doc.getElementById(id),
     resolveHref: (href: string) => {
@@ -239,7 +276,7 @@ export async function makeMarkdownBook(file: File): Promise<BookDoc> {
       return { index, anchor: (doc: Document) => doc.getElementById(b) };
     },
     isExternal: (uri: string): boolean => isExternalUri(uri),
-    getCover: async (): Promise<Blob | null> => null,
+    getCover: async (): Promise<Blob | null> => coverBlob,
     destroy: () => {
       for (const url of urls) if (url) URL.revokeObjectURL(url);
     },

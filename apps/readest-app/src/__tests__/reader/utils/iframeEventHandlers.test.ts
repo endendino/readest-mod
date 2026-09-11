@@ -18,6 +18,8 @@ function mouseEvent(overrides: Partial<MouseEvent> = {}): MouseEvent {
     altKey: false,
     metaKey: false,
     target: null,
+    preventDefault: vi.fn(),
+    stopImmediatePropagation: vi.fn(),
     ...overrides,
   } as unknown as MouseEvent;
 }
@@ -30,7 +32,9 @@ function touchEvent(touches: Touch[], changedTouches: Touch[] = touches): TouchE
   return {
     touches: touches as unknown as TouchList,
     changedTouches: changedTouches as unknown as TouchList,
-  } as TouchEvent;
+    timeStamp: 0,
+    preventDefault: vi.fn(),
+  } as unknown as TouchEvent;
 }
 
 function postedTypes(spy: ReturnType<typeof vi.spyOn>): string[] {
@@ -58,7 +62,7 @@ describe('iframeEventHandlers click gestures', () => {
     // First click of the double-click: full down/up/click cycle.
     handleMousedown('book-1', mouseEvent());
     handleMouseup('book-1', mouseEvent());
-    handleClick('book-1', doubleClickDisabled, false, mouseEvent());
+    handleClick('book-1', doubleClickDisabled, false, false, mouseEvent());
 
     // The second click begins shortly after and is HELD while the user drags
     // to extend the native word selection — so only mousedown fires, no
@@ -80,7 +84,7 @@ describe('iframeEventHandlers click gestures', () => {
 
     handleMousedown('book-1', mouseEvent());
     handleMouseup('book-1', mouseEvent());
-    handleClick('book-1', doubleClickDisabled, false, mouseEvent());
+    handleClick('book-1', doubleClickDisabled, false, false, mouseEvent());
 
     vi.advanceTimersByTime(260);
 
@@ -94,19 +98,76 @@ describe('iframeEventHandlers click gestures', () => {
     // First click.
     handleMousedown('book-1', mouseEvent());
     handleMouseup('book-1', mouseEvent());
-    handleClick('book-1', doubleClickDisabled, false, mouseEvent());
+    handleClick('book-1', doubleClickDisabled, false, false, mouseEvent());
 
     // Second click lands quickly (no drag): a complete down/up/click cycle.
     vi.advanceTimersByTime(100);
     handleMousedown('book-1', mouseEvent());
     handleMouseup('book-1', mouseEvent());
-    handleClick('book-1', doubleClickDisabled, false, mouseEvent());
+    handleClick('book-1', doubleClickDisabled, false, false, mouseEvent());
 
     vi.advanceTimersByTime(260);
 
     const types = postedTypes(postSpy);
     expect(types).toContain('iframe-double-click');
     expect(types).not.toContain('iframe-single-click');
+  });
+
+  test('iframe shortcuts are consumed synchronously or fall back to reader events', async () => {
+    const { eventDispatcher } = await import('@/utils/event');
+    const dispatchSpy = vi
+      .spyOn(eventDispatcher, 'dispatchSync')
+      .mockImplementation((name) => name === 'iframe-shortcut-mouseup');
+    const { handleAuxclick, handleKeydown, handleMousedown, handleMouseup } =
+      await importHandlers();
+    const consumedDown = mouseEvent({ button: 3 });
+    const consumedUp = mouseEvent({ button: 3 });
+    const consumedAux = mouseEvent({ button: 3 });
+
+    handleMousedown('book-1', consumedDown);
+    handleMouseup('book-1', consumedUp);
+    handleAuxclick('book-1', consumedAux);
+
+    expect(dispatchSpy).toHaveBeenCalledWith('iframe-shortcut-mouseup', {
+      bookKey: 'book-1',
+      event: consumedUp,
+    });
+    expect(consumedDown.preventDefault).toHaveBeenCalledOnce();
+    expect(consumedUp.preventDefault).toHaveBeenCalledOnce();
+    expect(consumedAux.preventDefault).toHaveBeenCalledOnce();
+    expect(postedTypes(postSpy)).not.toContain('iframe-mouseup');
+
+    dispatchSpy.mockImplementation((name) => name === 'iframe-shortcut-keydown');
+    const keyEvent = {
+      key: 'F5',
+      code: 'F5',
+      ctrlKey: false,
+      shiftKey: false,
+      altKey: false,
+      metaKey: false,
+      repeat: false,
+      target: null,
+      getModifierState: () => false,
+      preventDefault: vi.fn(),
+      stopImmediatePropagation: vi.fn(),
+    } as unknown as KeyboardEvent;
+    handleKeydown('book-1', keyEvent);
+    expect(keyEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(keyEvent.stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(
+      postSpy.mock.calls.find(
+        (call: unknown[]) => (call[0] as { type?: string }).type === 'iframe-keydown',
+      )?.[0],
+    ).toMatchObject({ type: 'iframe-keydown', handled: true });
+
+    dispatchSpy.mockReturnValue(false);
+    handleMouseup('book-1', mouseEvent({ button: 4 }));
+    expect(
+      postSpy.mock.calls.some((call: unknown[]) => {
+        const message = call[0] as { type?: string; button?: number };
+        return message.type === 'iframe-mouseup' && message.button === 4;
+      }),
+    ).toBe(true);
   });
 });
 
@@ -133,12 +194,13 @@ describe('single-tap opens image gallery / table zoom in reflowable books (#4584
     handlers: Awaited<ReturnType<typeof importHandlers>>,
     isFixedLayout: boolean,
     target: EventTarget | null,
+    isComicBook = false,
   ) => {
     const { handleClick, handleMousedown, handleMouseup } = handlers;
     const doubleClickDisabled = { current: false };
     handleMousedown('book-1', mouseEvent());
     handleMouseup('book-1', mouseEvent());
-    handleClick('book-1', doubleClickDisabled, isFixedLayout, mouseEvent({ target }));
+    handleClick('book-1', doubleClickDisabled, isFixedLayout, isComicBook, mouseEvent({ target }));
     vi.advanceTimersByTime(260);
   };
 
@@ -240,6 +302,7 @@ describe('iframeEventHandlers touch forwarding', () => {
 
   beforeEach(() => {
     vi.resetModules();
+    vi.useFakeTimers();
     postSpy = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
   });
 
@@ -317,12 +380,30 @@ describe('iframeEventHandlers touch forwarding', () => {
     handleTouchEnd('book-1', touchEvent([], [released]));
     handleMousedown('book-1', mouseEvent({ screenX: 160, screenY: 300 }));
     handleMouseup('book-1', mouseEvent({ screenX: 160, screenY: 300 }));
-    handleClick('book-1', { current: true }, false, mouseEvent({ screenX: 160, screenY: 300 }));
+    handleClick(
+      'book-1',
+      { current: true },
+      false,
+      false,
+      mouseEvent({ screenX: 160, screenY: 300 }),
+    );
+    vi.advanceTimersByTime(0);
 
     const singleClicks = postSpy.mock.calls
       .map((call: unknown[]) => call[0] as { type: string; screenX?: number })
       .filter((message: { type: string }) => message.type === 'iframe-single-click');
     expect(singleClicks).toEqual([expect.objectContaining({ screenX: 160 })]);
+  });
+
+  test('tracks the raw touch lifetime independently of app interceptor ownership', async () => {
+    const { handleTouchStart, handleTouchEnd, isLayeredTurnTouchActive } = await importHandlers();
+    const point = touchPoint(200, 300);
+
+    expect(isLayeredTurnTouchActive('book-1')).toBe(false);
+    handleTouchStart('book-1', touchEvent([point]));
+    expect(isLayeredTurnTouchActive('book-1')).toBe(true);
+    handleTouchEnd('book-1', touchEvent([], [point]));
+    expect(isLayeredTurnTouchActive('book-1')).toBe(false);
   });
 
   test('a swipe suppresses its synthesized click', async () => {
@@ -343,8 +424,77 @@ describe('iframeEventHandlers touch forwarding', () => {
     handleTouchEnd('book-1', touchEvent([], [end]));
     handleMousedown('book-1', mouseEvent({ screenX: 120, screenY: 300 }));
     handleMouseup('book-1', mouseEvent({ screenX: 120, screenY: 300 }));
-    handleClick('book-1', { current: false }, false, mouseEvent({ screenX: 120, screenY: 300 }));
+    handleClick(
+      'book-1',
+      { current: false },
+      false,
+      false,
+      mouseEvent({ screenX: 120, screenY: 300 }),
+    );
     vi.advanceTimersByTime(300);
+
+    expect(postedTypes(postSpy)).not.toContain('iframe-single-click');
+  });
+
+  test('a layered turn claimed below 15px suppresses its synthesized click', async () => {
+    vi.useFakeTimers();
+    const {
+      handleClick,
+      handleMousedown,
+      handleMouseup,
+      handleTouchStart,
+      handleTouchMove,
+      handleTouchEnd,
+      setLayeredTurnTouchClaimed,
+    } = await importHandlers();
+    const start = touchPoint(200, 300);
+    const end = touchPoint(194, 300);
+
+    handleTouchStart('book-1', touchEvent([start]));
+    handleTouchMove('book-1', touchEvent([end]));
+    setLayeredTurnTouchClaimed('book-1', true);
+    const touchEnd = touchEvent([], [end]);
+    handleTouchEnd('book-1', touchEnd);
+    handleMousedown('book-1', mouseEvent({ screenX: 194, screenY: 300 }));
+    handleMouseup('book-1', mouseEvent({ screenX: 194, screenY: 300 }));
+    const click = mouseEvent({ screenX: 194, screenY: 300 });
+    handleClick('book-1', { current: false }, false, false, click);
+    vi.advanceTimersByTime(300);
+
+    expect(postedTypes(postSpy)).not.toContain('iframe-single-click');
+    expect(touchEnd.preventDefault).toHaveBeenCalled();
+    expect(click.preventDefault).toHaveBeenCalled();
+    expect(click.stopImmediatePropagation).toHaveBeenCalled();
+  });
+
+  test('a native layered claim arriving after touchend still suppresses its click', async () => {
+    vi.useFakeTimers();
+    const {
+      handleClick,
+      handleMousedown,
+      handleMouseup,
+      handleTouchStart,
+      handleTouchMove,
+      handleTouchEnd,
+      setLayeredTurnTouchClaimed,
+    } = await importHandlers();
+    const start = touchPoint(200, 300);
+    const end = touchPoint(194, 300);
+
+    handleTouchStart('book-1', touchEvent([start]));
+    handleTouchMove('book-1', touchEvent([end]));
+    handleTouchEnd('book-1', touchEvent([], [end]));
+    handleMousedown('book-1', mouseEvent({ screenX: 194, screenY: 300 }));
+    handleMouseup('book-1', mouseEvent({ screenX: 194, screenY: 300 }));
+    handleClick(
+      'book-1',
+      { current: true },
+      false,
+      false,
+      mouseEvent({ screenX: 194, screenY: 300 }),
+    );
+    setLayeredTurnTouchClaimed('book-1', true);
+    vi.advanceTimersByTime(0);
 
     expect(postedTypes(postSpy)).not.toContain('iframe-single-click');
   });
@@ -360,7 +510,13 @@ describe('iframeEventHandlers touch forwarding', () => {
     handleTouchEnd('book-1', touchEvent([], [end]));
     handleMousedown('book-1', mouseEvent({ screenX: 120, screenY: 300 }));
     handleMouseup('book-1', mouseEvent({ screenX: 120, screenY: 300 }));
-    handleClick('book-1', { current: false }, false, mouseEvent({ screenX: 120, screenY: 300 }));
+    handleClick(
+      'book-1',
+      { current: false },
+      false,
+      false,
+      mouseEvent({ screenX: 120, screenY: 300 }),
+    );
     vi.advanceTimersByTime(300);
 
     expect(postedTypes(postSpy)).not.toContain('iframe-single-click');
@@ -376,7 +532,13 @@ describe('iframeEventHandlers touch forwarding', () => {
     handleTouchEnd('book-1', touchEvent([], [point]));
     handleMousedown('book-1', mouseEvent({ screenX: 200, screenY: 300 }));
     handleMouseup('book-1', mouseEvent({ screenX: 200, screenY: 300 }));
-    handleClick('book-1', { current: false }, false, mouseEvent({ screenX: 200, screenY: 300 }));
+    handleClick(
+      'book-1',
+      { current: false },
+      false,
+      false,
+      mouseEvent({ screenX: 200, screenY: 300 }),
+    );
     vi.advanceTimersByTime(300);
 
     expect(postedTypes(postSpy)).toContain('iframe-single-click');
@@ -398,11 +560,25 @@ describe('iframeEventHandlers touch forwarding', () => {
     handleTouchEnd('book-1', touchEvent([], [tapPoint]));
     handleMousedown('book-1', mouseEvent({ screenX: 210, screenY: 300 }));
     handleMouseup('book-1', mouseEvent({ screenX: 210, screenY: 300 }));
-    handleClick('book-1', { current: true }, false, mouseEvent({ screenX: 210, screenY: 300 }));
+    handleClick(
+      'book-1',
+      { current: true },
+      false,
+      false,
+      mouseEvent({ screenX: 210, screenY: 300 }),
+    );
+    vi.advanceTimersByTime(0);
 
     handleMousedown('book-1', mouseEvent({ screenX: 120, screenY: 300 }));
     handleMouseup('book-1', mouseEvent({ screenX: 120, screenY: 300 }));
-    handleClick('book-1', { current: true }, false, mouseEvent({ screenX: 120, screenY: 300 }));
+    handleClick(
+      'book-1',
+      { current: true },
+      false,
+      false,
+      mouseEvent({ screenX: 120, screenY: 300 }),
+    );
+    vi.advanceTimersByTime(0);
 
     const singleClicks = postSpy.mock.calls
       .map((call: unknown[]) => call[0] as { type: string; screenX?: number })

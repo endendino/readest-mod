@@ -39,7 +39,7 @@ describe('fork pin: cloud sync is never paywalled', () => {
   });
 
   test('a plan-less (free) device is allowed to sync', () => {
-    expect(isCloudSyncAllowed('free')).toBe(true);
+    expect(isCloudSyncAllowed('free', false)).toBe(true);
   });
 });
 

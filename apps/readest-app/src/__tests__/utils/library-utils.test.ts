@@ -14,10 +14,12 @@ import {
   findGroupById,
   getGroupDisplayName,
   expandBookshelfSelection,
+  selectDownloadableBooks,
   buildGroupNameUpdatedAt,
+  resolveCurrentShelfBooks,
   withTimeRemainingLast,
 } from '../../app/library/utils/libraryUtils';
-import { Book, BooksGroup } from '../../types/book';
+import { Book, BooksGroup, ReadingStatus } from '../../types/book';
 import { LibraryGroupByType, LibrarySortByType } from '../../types/settings';
 import { BookMetadata } from '@/libs/document';
 
@@ -249,6 +251,217 @@ describe('createBookGroups', () => {
       // Group mode just returns filtered books - actual grouping is in generateBookshelfItems
       expect(result).toHaveLength(2);
     });
+  });
+
+  describe('groupBy: tag and subject', () => {
+    it('groups normalized tags and every supported subject metadata shape', () => {
+      const tagged = createMockBook({ hash: 'tagged', tags: [' Fiction ', 'Favorite', 'Fiction'] });
+      const untagged = createMockBook({ hash: 'untagged', tags: ['  '] });
+
+      const tagResult = createBookGroups([tagged, untagged], LibraryGroupByType.Tag);
+      const tagGroups = tagResult.filter((item): item is BooksGroup => 'books' in item);
+      const standalone = tagResult.filter((item): item is Book => 'format' in item);
+
+      expect(tagGroups.map(({ name }) => name)).toEqual(['Fiction', 'Favorite']);
+      expect(
+        tagGroups.every(({ books }) => books.map(({ hash }) => hash).join() === 'tagged'),
+      ).toBe(true);
+      expect(standalone.map(({ hash }) => hash)).toEqual(['untagged']);
+
+      const scalar = createMockBook({ hash: 'scalar', metadata: { subject: 'History' } });
+      const array = createMockBook({
+        hash: 'array',
+        metadata: { subject: ['History', 'Science'] },
+      });
+      const contributors = createMockBook({
+        hash: 'contributors',
+        metadata: {
+          subject: [{ name: { en: 'Science' } }, { name: { en: 'Biography' } }],
+        },
+      });
+
+      const subjectGroups = createBookGroups(
+        [scalar, array, contributors],
+        LibraryGroupByType.Subject,
+      ).filter((item): item is BooksGroup => 'books' in item);
+
+      expect(subjectGroups.find(({ name }) => name === 'History')?.books).toHaveLength(2);
+      expect(subjectGroups.find(({ name }) => name === 'Science')?.books).toHaveLength(2);
+      expect(subjectGroups.find(({ name }) => name === 'Biography')?.books).toHaveLength(1);
+    });
+
+    it('groups explicitly assigned reading statuses', () => {
+      const unread = createMockBook({ hash: 'unread', readingStatus: 'unread' });
+      const finished = createMockBook({ hash: 'finished', readingStatus: 'finished' });
+      const onHold = createMockBook({ hash: 'on-hold', readingStatus: 'abandoned' });
+
+      const result = createBookGroups([unread, finished, onHold], LibraryGroupByType.Status);
+      const groups = result.filter((item): item is BooksGroup => 'books' in item);
+
+      expect(groups.map(({ name }) => name)).toEqual(['unread', 'finished', 'abandoned']);
+      expect(groups.map(({ displayName }) => displayName)).toEqual([
+        'Unread',
+        'Finished',
+        'On hold',
+      ]);
+      expect(groups.every(({ books }) => books.length > 0)).toBe(true);
+    });
+
+    // Reading status is an optional annotation, not a lifecycle field: nothing
+    // stamps it at import, and opening a book *clears* 'unread' back to
+    // undefined. Keying the grouping off it alone dropped every never-opened
+    // book out of the shelf entirely (55% of a real 750-book library) and left
+    // "Unread" holding only books someone had manually re-marked (1 of 750).
+    // Status grouping must partition the shelf: every book lands in exactly one
+    // bucket, and nothing is left standalone.
+    it('partitions every book into exactly one status group', () => {
+      const books = [
+        createMockBook({ hash: 'never-opened' }),
+        createMockBook({ hash: 'marked-unread', readingStatus: 'unread' }),
+        createMockBook({ hash: 'in-progress', progress: [10, 100] }),
+        createMockBook({ hash: 'marked-reading', readingStatus: 'reading' }),
+        createMockBook({ hash: 'done', readingStatus: 'finished', progress: [100, 100] }),
+        createMockBook({ hash: 'parked', readingStatus: 'abandoned', progress: [30, 100] }),
+      ];
+
+      const result = createBookGroups(books, LibraryGroupByType.Status);
+      const groups = result.filter((item): item is BooksGroup => 'books' in item);
+      const standalone = result.filter((item): item is Book => 'format' in item);
+
+      expect(standalone).toEqual([]);
+      expect(groups.flatMap(({ books: b }) => b).length).toBe(books.length);
+      expect(
+        Object.fromEntries(
+          groups.map(({ name, books: b }) => [name, b.map(({ hash }) => hash).sort()]),
+        ),
+      ).toEqual({
+        // A never-opened book reads as unread to a user, and the app already
+        // treats 'unread' as "not started" by clearing it on first open.
+        unread: ['marked-unread', 'never-opened'],
+        reading: ['in-progress', 'marked-reading'],
+        finished: ['done'],
+        abandoned: ['parked'],
+      });
+    });
+
+    it('labels every reading status with its shipped translation key', () => {
+      const books = (['unread', 'reading', 'finished', 'abandoned'] as ReadingStatus[]).map(
+        (readingStatus) => createMockBook({ hash: readingStatus, readingStatus }),
+      );
+
+      const groups = createBookGroups(books, LibraryGroupByType.Status).filter(
+        (item): item is BooksGroup => 'books' in item,
+      );
+
+      // Keys that already exist in every public/locales/<lang>/translation.json.
+      expect(groups.map(({ displayName }) => displayName)).toEqual([
+        'Unread',
+        'Reading',
+        'Finished',
+        'On hold',
+      ]);
+    });
+
+    it('flags status groups as localized so the UI translates them', () => {
+      const statusGroups = createBookGroups(
+        [createMockBook({ readingStatus: 'abandoned' })],
+        LibraryGroupByType.Status,
+      ).filter((item): item is BooksGroup => 'books' in item);
+
+      expect(statusGroups.map(({ localized }) => localized)).toEqual([true]);
+    });
+
+    // Opening an 'unread' book clears its status to `undefined` (readerStore),
+    // so the books a user is actually reading carry no explicit status. Without
+    // deriving the bucket they'd all fall out of the grouping as loose items,
+    // which is exactly the shelf #1010 asks for.
+    it('derives the reading group from progress when no status is set', () => {
+      const inProgress = createMockBook({ hash: 'in-progress', progress: [10, 100] });
+      const neverOpened = createMockBook({ hash: 'never-opened' });
+
+      const result = createBookGroups([inProgress, neverOpened], LibraryGroupByType.Status);
+      const groups = result.filter((item): item is BooksGroup => 'books' in item);
+
+      expect(groups.map(({ name, displayName }) => [name, displayName])).toEqual([
+        ['reading', 'Reading'],
+        // Never opened: no progress to derive from, so it falls to Unread.
+        ['unread', 'Unread'],
+      ]);
+      expect(groups[0]!.books.map(({ hash }) => hash)).toEqual(['in-progress']);
+      expect(groups[1]!.books.map(({ hash }) => hash)).toEqual(['never-opened']);
+    });
+
+    it('lets an explicit status win over derived reading progress', () => {
+      const books = [
+        createMockBook({ hash: 'finished', readingStatus: 'finished', progress: [100, 100] }),
+        createMockBook({ hash: 'on-hold', readingStatus: 'abandoned', progress: [30, 100] }),
+        createMockBook({ hash: 'unread', readingStatus: 'unread', progress: [1, 100] }),
+        // Explicit 'reading' with no progress yet still groups as reading.
+        createMockBook({ hash: 'marked-reading', readingStatus: 'reading' }),
+      ];
+
+      const groups = createBookGroups(books, LibraryGroupByType.Status).filter(
+        (item): item is BooksGroup => 'books' in item,
+      );
+
+      expect(
+        groups.map(({ name, books: grouped }) => [name, grouped.map(({ hash }) => hash)]),
+      ).toEqual([
+        ['finished', ['finished']],
+        ['abandoned', ['on-hold']],
+        ['unread', ['unread']],
+        ['reading', ['marked-reading']],
+      ]);
+    });
+
+    it('leaves user-authored group names unlocalized', () => {
+      const tagGroups = createBookGroups(
+        [createMockBook({ tags: ['Unread'] })],
+        LibraryGroupByType.Tag,
+      ).filter((item): item is BooksGroup => 'books' in item);
+
+      // A tag that collides with a UI string must never be translated.
+      expect(tagGroups.map(({ displayName, localized }) => [displayName, localized])).toEqual([
+        ['Unread', undefined],
+      ]);
+    });
+  });
+});
+
+describe('resolveCurrentShelfBooks', () => {
+  const books = [
+    createMockBook({ hash: 'one', groupName: 'Fiction', tags: ['Favorite'] }),
+    createMockBook({ hash: 'two', groupName: 'Fiction/Classics', tags: ['Favorite', 'Classic'] }),
+    createMockBook({ hash: 'three', groupName: 'Fictional', metadata: { subject: ['History'] } }),
+    createMockBook({ hash: 'deleted', deletedAt: 1, tags: ['Favorite'] }),
+  ];
+
+  it('scopes root, virtual, manual, and invalid shelves without duplicates', () => {
+    expect(resolveCurrentShelfBooks(books, LibraryGroupByType.Tag).map(({ hash }) => hash)).toEqual(
+      ['one', 'two', 'three'],
+    );
+    const favorite = createBookGroups(books, LibraryGroupByType.Tag).find(
+      (item): item is BooksGroup => 'books' in item && item.name === 'Favorite',
+    )!;
+    const history = createBookGroups(books, LibraryGroupByType.Subject).find(
+      (item): item is BooksGroup => 'books' in item && item.name === 'History',
+    )!;
+
+    expect(
+      resolveCurrentShelfBooks(books, LibraryGroupByType.Tag, favorite.id).map(({ hash }) => hash),
+    ).toEqual(['one', 'two']);
+    expect(
+      resolveCurrentShelfBooks(books, LibraryGroupByType.Subject, history.id).map(
+        ({ hash }) => hash,
+      ),
+    ).toEqual(['three']);
+    expect(
+      resolveCurrentShelfBooks(books, LibraryGroupByType.Group, 'group-id', 'Fiction').map(
+        ({ hash }) => hash,
+      ),
+    ).toEqual(['one', 'two']);
+    expect(resolveCurrentShelfBooks(books, LibraryGroupByType.Tag, 'missing')).toEqual([]);
+    expect(resolveCurrentShelfBooks(books, LibraryGroupByType.None, 'stray')).toEqual([]);
   });
 });
 
@@ -774,6 +987,83 @@ describe('createBookSorter', () => {
   });
 });
 
+// Issue #5119: the primary and the secondary ("Then by") key each carry their
+// own sort order, so "authors Z->A, then titles A->Z" is expressible.
+describe('createBookSorter - independent sort orders', () => {
+  const books = [
+    createMockBook({ hash: '1', author: 'Beta Author', title: 'Zebra' }),
+    createMockBook({ hash: '2', author: 'Beta Author', title: 'Apple' }),
+    createMockBook({ hash: '3', author: 'Alpha Author', title: 'Mango' }),
+  ];
+
+  it('should keep the secondary ascending when the primary is descending', () => {
+    const sorter = createBookSorter(
+      LibrarySortByType.Author,
+      'en',
+      LibrarySortByType.Title,
+      false, // primary descending
+      true, // secondary ascending
+    );
+    const sorted = [...books].sort(sorter);
+
+    expect(sorted.map((book) => book.title)).toEqual(['Apple', 'Zebra', 'Mango']);
+  });
+
+  it('should apply a descending secondary while the primary stays ascending', () => {
+    const sorter = createBookSorter(
+      LibrarySortByType.Author,
+      'en',
+      LibrarySortByType.Title,
+      true, // primary ascending
+      false, // secondary descending
+    );
+    const sorted = [...books].sort(sorter);
+
+    expect(sorted.map((book) => book.title)).toEqual(['Mango', 'Zebra', 'Apple']);
+  });
+
+  it('should default both orders to ascending', () => {
+    const sorter = createBookSorter(LibrarySortByType.Author, 'en', LibrarySortByType.Title);
+    const sorted = [...books].sort(sorter);
+
+    expect(sorted.map((book) => book.title)).toEqual(['Mango', 'Apple', 'Zebra']);
+  });
+});
+
+describe('createWithinGroupSorter - secondary sort order', () => {
+  const books = [
+    createMockBook({ hash: '1', title: 'Apple', author: 'Author A', updatedAt: 1000 }),
+    createMockBook({ hash: '2', title: 'Zebra', author: 'Author A', updatedAt: 2000 }),
+  ];
+
+  it('should order the within-group secondary key descending when asked', () => {
+    const sorter = createWithinGroupSorter(
+      LibraryGroupByType.Author,
+      LibrarySortByType.Updated,
+      'en',
+      true,
+      LibrarySortByType.Title,
+      false, // secondary descending
+    );
+    const sorted = [...books].sort(sorter);
+
+    expect(sorted.map((book) => book.title)).toEqual(['Zebra', 'Apple']);
+  });
+
+  it('should keep the within-group secondary ascending by default', () => {
+    const sorter = createWithinGroupSorter(
+      LibraryGroupByType.Author,
+      LibrarySortByType.Updated,
+      'en',
+      true,
+      LibrarySortByType.Title,
+    );
+    const sorted = [...books].sort(sorter);
+
+    expect(sorted.map((book) => book.title)).toEqual(['Apple', 'Zebra']);
+  });
+});
+
 describe('grouping and sorting integration', () => {
   it('should correctly group by series and sort groups by date read', () => {
     const books = [
@@ -1122,6 +1412,84 @@ describe('expandBookshelfSelection', () => {
     // it was a hash from another view), the helper leaves it alone rather
     // than silently dropping it.
     expect(expandBookshelfSelection(['ghost-hash'], [])).toEqual(['ghost-hash']);
+  });
+});
+
+describe('selectDownloadableBooks', () => {
+  const createMockGroup = (overrides: Partial<BooksGroup> = {}): BooksGroup => ({
+    id: 'test-group',
+    name: 'Test Group',
+    displayName: 'Test Display Name',
+    books: [],
+    updatedAt: Date.now(),
+    ...overrides,
+  });
+
+  // Bulk download (#5244): a selected group stands in for every book it shows,
+  // so a 300-book folder can be pulled down in one action.
+  it('expands a group id into its cloud-only books', () => {
+    const cloudOnly = createMockBook({ hash: 'cloud-only', uploadedAt: 100 });
+    const nested = createMockBook({ hash: 'nested', groupName: 'MyDir/sub', uploadedAt: 100 });
+    const items: (Book | BooksGroup)[] = [
+      createMockGroup({ id: 'group-mydir', name: 'MyDir', books: [cloudOnly, nested] }),
+    ];
+
+    expect(selectDownloadableBooks(['group-mydir'], items, [cloudOnly, nested])).toEqual([
+      cloudOnly,
+      nested,
+    ]);
+  });
+
+  it('skips books that are already on this device', () => {
+    const local = createMockBook({ hash: 'local', uploadedAt: 100, downloadedAt: 200 });
+    const cloudOnly = createMockBook({ hash: 'cloud-only', uploadedAt: 100 });
+    const items: (Book | BooksGroup)[] = [local, cloudOnly];
+
+    expect(selectDownloadableBooks(['local', 'cloud-only'], items, [local, cloudOnly])).toEqual([
+      cloudOnly,
+    ]);
+  });
+
+  it('skips books that were never uploaded', () => {
+    const localOnly = createMockBook({ hash: 'local-only', downloadedAt: 200 });
+    const items: (Book | BooksGroup)[] = [localOnly];
+
+    expect(selectDownloadableBooks(['local-only'], items, [localOnly])).toEqual([]);
+  });
+
+  it('skips feed books, which have no file to fetch', () => {
+    const feed = createMockBook({
+      hash: 'feed',
+      uploadedAt: 100,
+      url: 'feed://%7B%22feedUrl%22%3A%22https%3A%2F%2Fexample.com%2Frss%22%7D',
+    });
+    const items: (Book | BooksGroup)[] = [feed];
+
+    expect(selectDownloadableBooks(['feed'], items, [feed])).toEqual([]);
+  });
+
+  it('skips soft-deleted books', () => {
+    const gone = createMockBook({ hash: 'gone', uploadedAt: 100, deletedAt: 300 });
+    const items: (Book | BooksGroup)[] = [gone];
+
+    expect(selectDownloadableBooks(['gone'], items, [gone])).toEqual([]);
+  });
+
+  it('deduplicates when a book and its parent group are both selected', () => {
+    const bookA = createMockBook({ hash: 'book-a', uploadedAt: 100 });
+    const bookB = createMockBook({ hash: 'book-b', uploadedAt: 100 });
+    const items: (Book | BooksGroup)[] = [
+      createMockGroup({ id: 'group-1', books: [bookA, bookB] }),
+    ];
+
+    expect(selectDownloadableBooks(['book-a', 'group-1'], items, [bookA, bookB])).toEqual([
+      bookA,
+      bookB,
+    ]);
+  });
+
+  it('returns an empty array when nothing is selected', () => {
+    expect(selectDownloadableBooks([], [], [])).toEqual([]);
   });
 });
 

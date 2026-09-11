@@ -229,7 +229,7 @@ export default function FeedsPage() {
             <button
               type='button'
               onClick={() => void onUndo()}
-              className='btn btn-ghost btn-sm text-primary flex-shrink-0'
+              className='btn btn-ghost btn-sm text-primary shrink-0'
             >
               {_('Undo')}
             </button>
@@ -246,7 +246,7 @@ export default function FeedsPage() {
             disabled={loading}
             aria-label={_('Refresh')}
             title={_('Refresh')}
-            className='btn btn-ghost btn-sm btn-circle flex-shrink-0'
+            className='btn btn-ghost btn-sm btn-circle shrink-0'
           >
             <MdRefresh className={clsx('h-5 w-5', loading && 'animate-spin')} />
           </button>
@@ -259,7 +259,7 @@ export default function FeedsPage() {
             aria-label={confirmingAll ? _('Confirm mark all read') : _('Mark all read')}
             title={_('Mark all read')}
             className={clsx(
-              'btn btn-sm flex-shrink-0',
+              'btn btn-sm shrink-0',
               confirmingAll ? 'btn-primary gap-1' : 'btn-ghost btn-circle',
             )}
           >

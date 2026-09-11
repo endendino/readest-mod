@@ -116,7 +116,10 @@ fn is_within_app_storage(file_path: &str, app_identifier: &str) -> bool {
 /// privileged Tauri origin — see GHSA-55vr-pvq5-6fmg. We require an absolute,
 /// traversal-free path that is either granted by the fs scope (persisted dialog
 /// grants for custom/external roots) or lives inside the app's own storage.
-fn ensure_path_allowed(app: &AppHandle, file_path: &str) -> Result<()> {
+pub(crate) fn ensure_path_allowed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    file_path: &str,
+) -> std::result::Result<(), Error> {
     if has_disallowed_components(file_path) {
         return Err(Error::Forbidden(file_path.to_string()));
     }
@@ -147,8 +150,8 @@ pub struct ProgressPayload {
 
 #[command]
 #[allow(clippy::too_many_arguments)] // Tauri command surface mirrors the JS caller's options.
-pub async fn download_file(
-    app: AppHandle,
+pub async fn download_file<R: tauri::Runtime>(
+    app: AppHandle<R>,
     url: &str,
     file_path: &str,
     headers: HashMap<String, String>,
@@ -326,8 +329,8 @@ pub async fn download_file(
 }
 
 #[command]
-pub async fn upload_file(
-    app: AppHandle,
+pub async fn upload_file<R: tauri::Runtime>(
+    app: AppHandle<R>,
     url: &str,
     file_path: &str,
     method: &str,

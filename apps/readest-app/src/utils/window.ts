@@ -4,6 +4,45 @@ import { exit } from '@tauri-apps/plugin-process';
 import { type as osType } from '@tauri-apps/plugin-os';
 import { eventDispatcher } from './event';
 
+const APP_NAME = 'Readest';
+
+/**
+ * The OS window title, e.g. `Readest - The Hobbit`. It is never drawn in the
+ * UI — desktop windows are either decorationless (Windows/Linux) or hide their
+ * title text (the macOS overlay title bar) — but window switchers and screen
+ * readers announce it, so it has to name the open book to tell windows apart.
+ */
+export const formatAppWindowTitle = (bookTitle?: string) => {
+  const title = bookTitle?.trim();
+  return title ? `${APP_NAME} - ${title}` : APP_NAME;
+};
+
+/**
+ * Whether this webview is the window the OS launched the app into.
+ *
+ * Cold-start deep links belong to that window alone. tauri-plugin-deep-link
+ * keeps the launch URL in process-global state for the whole session — macOS
+ * replaces it on every `RunEvent::Opened` and nothing ever clears it — so
+ * `getCurrent()` keeps returning it long after the link was acted on. The
+ * consume-once guards on the JS side are per-webview (a module flag, a
+ * sessionStorage key), so every window the app spawns itself (`reader-N` from
+ * showReaderWindow / showLibraryWindow) starts out believing the stale URL is
+ * its own cold start and hijacks whatever the user actually opened (#6104).
+ * Those windows carry their own intent in their URL, so they never need it.
+ */
+export const isMainAppWindow = () => {
+  try {
+    return getCurrentWindow().label === 'main';
+  } catch {
+    // No Tauri window API (web build): nothing spawns extra webviews there.
+    return true;
+  }
+};
+
+export const tauriSetWindowTitle = async (bookTitle?: string) => {
+  await getCurrentWindow().setTitle(formatAppWindowTitle(bookTitle));
+};
+
 export const tauriGetWindowLogicalPosition = async () => {
   const currentWindow = getCurrentWindow();
   const factor = await currentWindow.scaleFactor();
@@ -68,15 +107,42 @@ export const tauriHandleOnCloseWindow = async (callback: () => void) => {
   });
 };
 
+// Whether the window was maximized when it last entered fullscreen, so the
+// maximized state survives a fullscreen round-trip on Windows.
+let wasMaximizedBeforeFullscreen = false;
+
 export const tauriHandleToggleFullScreen = async () => {
+  // Reader/library shortcuts also run on mobile, where Tauri does not
+  // register the desktop fullscreen commands (READEST-10K).
+  const platform = await osType();
+  if (platform === 'android' || platform === 'ios') return;
+
   const currentWindow = getCurrentWindow();
   const isFullscreen = await currentWindow.isFullscreen();
   // Toggle fullscreen regardless of the maximized state. Previously a maximized
   // window was only unmaximized here, so the fullscreen button did nothing when
   // the window was maximized, which is always the case on mobile shells like
   // Phosh and common on Windows (issue #4034).
-  await currentWindow.setFullscreen(!isFullscreen);
-  if ((await osType()) === 'linux') {
+  if (isFullscreen) {
+    await currentWindow.setFullscreen(false);
+    if (wasMaximizedBeforeFullscreen) {
+      wasMaximizedBeforeFullscreen = false;
+      await currentWindow.maximize();
+    }
+  } else {
+    // On Windows, tao keeps the WS_MAXIMIZE style when a maximized window
+    // enters borderless fullscreen, so Windows clamps the window to the work
+    // area and the taskbar stays visible but unclickable (issue #5295).
+    // Unmaximize first and restore the maximized state on exit. Other
+    // platforms must keep entering fullscreen straight from the maximized
+    // state (Phosh windows are always maximized).
+    wasMaximizedBeforeFullscreen = platform === 'windows' && (await currentWindow.isMaximized());
+    if (wasMaximizedBeforeFullscreen) {
+      await currentWindow.unmaximize();
+    }
+    await currentWindow.setFullscreen(true);
+  }
+  if (platform === 'linux') {
     linuxWindowRestoreTransparentBg();
   }
 };

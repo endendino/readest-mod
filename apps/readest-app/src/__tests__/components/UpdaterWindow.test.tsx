@@ -9,8 +9,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 
+const { mockInstallNightlyUpdate } = vi.hoisted(() => ({
+  mockInstallNightlyUpdate: vi.fn(),
+}));
+
 // ── Locale + translation controls ────────────────────────────────
 let mockLocale = 'en';
+let mockOS = 'macos';
 const mockTranslate = vi.fn(async (input: string[]) => input.map((s) => `[zh] ${s}`));
 
 vi.mock('@/utils/misc', () => ({
@@ -37,10 +42,11 @@ vi.mock('next/navigation', () => ({
 vi.mock('@/context/EnvContext', () => ({
   useEnv: () => ({
     appService: {
-      hasUpdater: false,
+      hasUpdater: true,
       isIOSApp: false,
       isMacOSApp: false,
-      isAndroidApp: false,
+      isAndroidApp: mockOS === 'android',
+      resolveFilePath: async (name: string) => `/cache/${name}`,
     },
   }),
 }));
@@ -66,7 +72,7 @@ vi.mock('@/services/constants', () => ({
 }));
 
 // ── Tauri / heavy modules pulled in by UpdaterWindow's top-level imports ──
-vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'macos', arch: () => 'aarch64' }));
+vi.mock('@tauri-apps/plugin-os', () => ({ type: () => mockOS, arch: () => 'aarch64' }));
 vi.mock('@tauri-apps/plugin-updater', () => ({ check: vi.fn(), Update: class {} }));
 vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn(), exit: vi.fn() }));
 vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }));
@@ -77,7 +83,7 @@ vi.mock('@/utils/transfer', () => ({ tauriDownload: vi.fn() }));
 vi.mock('@/utils/bridge', () => ({
   installPackage: vi.fn(),
   verifyUpdateSignature: vi.fn(),
-  installNightlyUpdate: vi.fn(),
+  installNightlyUpdate: mockInstallNightlyUpdate,
 }));
 vi.mock('next/image', () => ({ default: () => null }));
 vi.mock('@/components/Dialog', () => ({
@@ -86,6 +92,8 @@ vi.mock('@/components/Dialog', () => ({
 vi.mock('@/components/Link', () => ({ default: () => null }));
 
 import { UpdaterContent } from '@/components/UpdaterWindow';
+import { tauriDownload } from '@/utils/transfer';
+import { installPackage } from '@/utils/bridge';
 
 const RELEASE_NOTES = {
   releases: {
@@ -95,7 +103,11 @@ const RELEASE_NOTES = {
 
 beforeEach(() => {
   mockLocale = 'en';
+  mockOS = 'macos';
+  vi.mocked(tauriDownload).mockReset();
+  vi.mocked(installPackage).mockReset();
   mockTranslate.mockClear();
+  mockInstallNightlyUpdate.mockReset();
   window.fetch = vi.fn(async () => ({
     ok: true,
     json: async () => RELEASE_NOTES,
@@ -107,6 +119,53 @@ afterEach(() => {
 });
 
 describe('UpdaterContent — auto-translated changelog', () => {
+  it('contains a stable Android download failure and does not install a partial APK', async () => {
+    mockOS = 'android';
+    const failure = new Error('Response stream interrupted');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(tauriDownload).mockRejectedValueOnce(failure);
+    vi.mocked(window.fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        version: '0.11.20',
+        platforms: { 'android-arm64': { url: 'https://example.com/update.apk' } },
+      }),
+    } as Response);
+
+    render(<UpdaterContent latestVersion='0.11.20' />);
+    fireEvent.click(await screen.findByRole('button', { name: 'DOWNLOAD & INSTALL' }));
+
+    expect(await screen.findByText('Failed to download and install update')).toBeTruthy();
+    expect(tauriDownload).toHaveBeenCalledOnce();
+    expect(installPackage).not.toHaveBeenCalled();
+  });
+
+  it('contains download failures and shows an updater error', async () => {
+    const failure = 'Download request failed with status: 403 Forbidden';
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockInstallNightlyUpdate.mockRejectedValueOnce(failure);
+
+    render(
+      <UpdaterContent
+        latestVersion='0.11.20'
+        nightlyUpdate={{
+          endpoint: 'https://example.com/nightly.json',
+          version: '0.11.20',
+          platformKey: 'windows-x86_64',
+          url: 'https://example.com/readest.exe',
+          signature: 'signature',
+        }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'DOWNLOAD & INSTALL' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to download and install update')).toBeTruthy();
+    });
+    expect(consoleError).toHaveBeenCalledWith('Failed to download and install update:', failure);
+  });
+
   it('shows a "Show original" toggle that swaps the translation for the source English', async () => {
     mockLocale = 'zh-CN';
     render(<UpdaterContent checkUpdate={false} latestVersion='0.11.18' lastVersion='0.11.0' />);

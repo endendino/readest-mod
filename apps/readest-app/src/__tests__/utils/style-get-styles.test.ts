@@ -64,6 +64,22 @@ function makeThemeCode(overrides: Partial<ThemeCode> = {}): ThemeCode {
 // ---------------------------------------------------------------------------
 // getFontStyles branches
 // ---------------------------------------------------------------------------
+describe('oversized-block rules (via getStyles)', () => {
+  it('does not force pre-wrap white-space onto MathML (#480)', () => {
+    // MathML markup is usually pretty-printed; pre-wrap would turn the newlines
+    // and indentation between <mi>/<mo> tokens into rendered line breaks and
+    // spaces, breaking every inline formula onto its own line.
+    const css = getStyles(makeViewSettings(), makeThemeCode());
+    const preWrapSelectors = [...css.matchAll(/([^{}]+)\{[^}]*white-space:\s*pre-wrap/g)].map((m) =>
+      m[1]!.trim(),
+    );
+    expect(preWrapSelectors.length).toBeGreaterThan(0);
+    for (const selector of preWrapSelectors) {
+      expect(selector).not.toMatch(/\bmath\b/);
+    }
+  });
+});
+
 describe('getFontStyles branches (via getStyles)', () => {
   const theme = makeThemeCode();
 
@@ -94,6 +110,35 @@ describe('getFontStyles branches (via getStyles)', () => {
     expect(css).toMatch(/font-family: var\(--serif\)\s*[^!]/);
     // And body block should not have font-family at all
     expect(css).not.toContain('font-family: revert !important');
+  });
+
+  // Regression: the app default font used to be injected as a plain `html`
+  // rule, tying on specificity with ebook CSS that also declares its font on
+  // the html element (Pandoc-style EPUBs) and winning purely by injection
+  // order — the book's embedded font silently never applied with "Override
+  // Book Font" off. :where() drops the rule's specificity to zero so any book
+  // declaration beats it.
+  it('injects the default font at zero specificity via :where(html)', () => {
+    const vs = makeViewSettings({ overrideFont: false, defaultFont: 'Serif' });
+    const css = getStyles(vs, theme);
+    expect(css).toContain(':where(html)');
+    expect(css).toMatch(/:where\(html\)\s*\{\s*font-family: var\(--serif\)/);
+  });
+
+  // The monospace injection is zero-specificity too, so a book's own code font
+  // wins when Override Book Font is off. With the toggle ON the rule has to
+  // swap sides and outrank the book, which !important alone cannot do:
+  // specificity still breaks ties between important author declarations.
+  // The resolved cascade is asserted in code-font-override.browser.test.ts.
+  it('swaps the monospace rule above the book only when overrideFont is on', () => {
+    const off = getStyles(makeViewSettings({ overrideFont: false }), theme);
+    expect(off).toMatch(/:where\(pre, code, kbd\)\s*\{\s*font-family: var\(--monospace\)\s*;/);
+
+    const on = getStyles(makeViewSettings({ overrideFont: true }), theme);
+    expect(on).toMatch(
+      /html body :is\(pre, code, kbd\)\s*\{\s*font-family: var\(--monospace\) !important\s*;/,
+    );
+    expect(on).not.toContain(':where(pre, code, kbd)');
   });
 
   it('sets font-size according to defaultFontSize', () => {
@@ -391,6 +436,9 @@ describe('getLayoutStyles branches (via getStyles)', () => {
     expect(css).not.toContain('text-indent: 2em');
     expect(css).not.toContain('hyphens: auto');
     expect(css).not.toContain('-webkit-hyphens: auto');
+    // the body line-height reset exists to make room for our paragraph rules;
+    // with the book's layout in charge its `body { line-height }` must inherit
+    expect(css).not.toContain('line-height: unset');
     // non-paragraph layout rules must still be emitted
     expect(css).toContain('@namespace epub');
     expect(css).toContain('--margin-top: 50px');
@@ -420,6 +468,7 @@ describe('getLayoutStyles branches (via getStyles)', () => {
     expect(css).toContain('letter-spacing: 2px');
     expect(css).toContain('text-indent: 2em');
     expect(css).toContain('hyphens: auto');
+    expect(css).toContain('line-height: unset');
   });
 });
 
@@ -502,6 +551,52 @@ describe('getColorStyles branches (via getStyles)', () => {
     // mix-blend-mode: multiply on img should not appear; there's one for hr.background-img and
     // has-text-siblings (which is always present), but not in the img block
     expect(css).not.toMatch(/^\s*img\s*\{[^}]*mix-blend-mode: multiply/m);
+  });
+
+  // #5250: with overrideColor also on, a second filter declaration in the same
+  // img rule silently discarded invert(100%) (last declaration wins), and
+  // mix-blend-mode: multiply erased images against dark page backgrounds
+  // (multiply with black is always black).
+  describe('invert image in dark mode combined with overrideColor (#5250)', () => {
+    // Concatenate every plain `img { ... }` rule in document order: they all
+    // share the same specificity, so this mirrors the cascade the browser
+    // applies (last declaration wins).
+    const getImgBlock = (css: string) => {
+      const blocks = [...css.matchAll(/^\s*img\s*\{([^}]*)\}/gm)].map((m) => m[1]!);
+      expect(blocks.length).toBeGreaterThan(0);
+      return blocks.join('\n');
+    };
+
+    it('keeps invert(100%) as the only filter declaration when overrideColor is on', () => {
+      const vs = makeViewSettings({ invertImgColorInDark: true, overrideColor: true });
+      const theme = makeThemeCode({ isDarkMode: true, bg: '#000000', fg: '#e0e0e0' });
+      const imgBlock = getImgBlock(getStyles(vs, theme));
+      const filters = [...imgBlock.matchAll(/filter:[^;]*;/g)].map((m) => m[0]);
+      expect(filters).toEqual(['filter: invert(100%);']);
+    });
+
+    it('does not multiply-blend inverted images into the dark background', () => {
+      const vs = makeViewSettings({ invertImgColorInDark: true, overrideColor: true });
+      const theme = makeThemeCode({ isDarkMode: true, bg: '#000000', fg: '#e0e0e0' });
+      const imgBlock = getImgBlock(getStyles(vs, theme));
+      expect(imgBlock).not.toContain('mix-blend-mode: multiply');
+    });
+
+    it('keeps the grayscale + multiply treatment when invert is off in dark mode', () => {
+      const vs = makeViewSettings({ invertImgColorInDark: false, overrideColor: true });
+      const theme = makeThemeCode({ isDarkMode: true, bg: '#1a1a1a', fg: '#e0e0e0' });
+      const imgBlock = getImgBlock(getStyles(vs, theme));
+      expect(imgBlock).toContain('filter: grayscale(100%) contrast(1.2) brightness(1.2);');
+      expect(imgBlock).toContain('mix-blend-mode: multiply;');
+    });
+
+    it('keeps multiply in light mode when overrideColor is on regardless of invert', () => {
+      const vs = makeViewSettings({ invertImgColorInDark: true, overrideColor: true });
+      const theme = makeThemeCode({ isDarkMode: false });
+      const imgBlock = getImgBlock(getStyles(vs, theme));
+      expect(imgBlock).toContain('mix-blend-mode: multiply;');
+      expect(imgBlock).not.toContain('filter: invert(100%)');
+    });
   });
 
   it('sets bg-texture-id CSS variable', () => {
@@ -889,7 +984,7 @@ describe('custom @font-face inlining (via getStyles)', () => {
 // `caretRangeFromPoint` (returns null on non-selectable content), killing the
 // instant highlight itself. The system selection is suppressed natively
 // instead (TextSelectionSuppressor in the native-bridge iOS plugin, driven by
-// setTextSelectionSuppressed from FoliateViewer); getStyles must stay free of
+// setSelectionSuppressed from FoliateViewer); getStyles must stay free of
 // user-select suppression so caret positioning keeps working.
 describe('instant-highlight selection suppression stays out of getStyles', () => {
   const theme = makeThemeCode();

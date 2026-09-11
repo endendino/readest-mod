@@ -44,6 +44,13 @@ const makeSettings = (overrides: Partial<SystemSettings> = {}): SystemSettings =
     kosync: { serverUrl: '', username: '', userkey: '', password: '' },
     readwise: { accessToken: '' },
     hardcover: { accessToken: '' },
+    notion: {
+      enabled: false,
+      accessToken: '',
+      databaseId: '',
+      lastSyncedAt: 0,
+      includeChapterHeading: true,
+    },
     webdav: { serverUrl: '', username: '', password: '', rootPath: '/' },
     ...overrides,
   }) as unknown as SystemSettings;
@@ -60,6 +67,22 @@ const enableCredentialsSync = (): void => {
   const current = useSettingsStore.getState().settings;
   useSettingsStore.setState({
     settings: { ...current, syncCategories: { credentials: true } } as never,
+  } as never);
+};
+
+/**
+ * Flip the 'dictionary' sync category for the current test. Dictionary
+ * preferences (providerOrder / providerEnabled / webSearches / fontScale)
+ * ride the bundled settings row but belong to the user-facing
+ * "Dictionaries" toggle, not "App settings" — see issue #5465.
+ */
+const setDictionarySync = (enabled: boolean): void => {
+  const current = useSettingsStore.getState().settings;
+  useSettingsStore.setState({
+    settings: {
+      ...current,
+      syncCategories: { ...current?.syncCategories, dictionary: enabled },
+    } as never,
   } as never);
 };
 
@@ -217,6 +240,47 @@ describe('publishSettingsIfChanged', () => {
     expect(patch.dictionarySettings?.providerEnabled).toEqual({ a: true, b: true });
   });
 
+  test('does NOT publish dictionarySettings when the dictionary category is OFF (issue #5465)', async () => {
+    setDictionarySync(false);
+    await publishSettingsIfChanged(
+      makeSettings({
+        dictionarySettings: {
+          providerOrder: ['imp-new'],
+          providerEnabled: { 'imp-new': true, 'builtin:systemDictionary': false },
+          webSearches: [{ id: 'web:y', name: 'Y', urlTemplate: 'https://y/?q=%WORD%' }],
+          fontScale: 1.2,
+        },
+      } as Partial<SystemSettings>),
+    );
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    const patch = publishMock.mock.calls[0]![1].patch as Partial<SystemSettings>;
+    expect(patch.dictionarySettings).toBeUndefined();
+    // Unrelated whitelisted settings ride the same row and still publish.
+    expect(patch.globalReadSettings?.customHighlightColors).toEqual(
+      baseHighlight.customHighlightColors,
+    );
+  });
+
+  test('markExplicitProviderOrderPublish does not override the OFF gate', async () => {
+    const { markExplicitProviderOrderPublish } = await import(
+      '@/services/sync/replicaSettingsSync'
+    );
+    setDictionarySync(false);
+    markExplicitProviderOrderPublish();
+    await publishSettingsIfChanged(
+      makeSettings({
+        dictionarySettings: {
+          providerOrder: ['imp-new', 'builtin:wiktionary'],
+          providerEnabled: { 'imp-new': true },
+          webSearches: [],
+        },
+      } as Partial<SystemSettings>),
+    );
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    const patch = publishMock.mock.calls[0]![1].patch as Partial<SystemSettings>;
+    expect(patch.dictionarySettings).toBeUndefined();
+  });
+
   test('triggers the passphrase gate when an encrypted field gets meaningful content while locked', async () => {
     enableCredentialsSync();
     isUnlocked = false;
@@ -286,6 +350,13 @@ describe('publishSettingsIfChanged', () => {
             enabled: true,
             lastSyncedAt: 0,
           } as SystemSettings['hardcover'],
+          notion: {
+            enabled: true,
+            accessToken: 'notion-token',
+            databaseId: 'notion-database-id',
+            lastSyncedAt: 0,
+            includeChapterHeading: false,
+          },
         }),
       );
       // Plaintext kosync.serverUrl still publishes — only the credential
@@ -298,6 +369,8 @@ describe('publishSettingsIfChanged', () => {
       expect(patch.kosync?.password).toBeUndefined();
       expect(patch.readwise?.accessToken).toBeUndefined();
       expect(patch.hardcover?.accessToken).toBeUndefined();
+      expect(patch.notion?.databaseId).toBe('notion-database-id');
+      expect(patch.notion?.accessToken).toBeUndefined();
     });
 
     test('publishes credential paths normally when credentials sync is ON', async () => {
@@ -311,11 +384,20 @@ describe('publishSettingsIfChanged', () => {
             userkey: '',
             password: 'hunter2',
           } as SystemSettings['kosync'],
+          notion: {
+            enabled: true,
+            accessToken: 'notion-token',
+            databaseId: 'notion-database-id',
+            lastSyncedAt: 0,
+            includeChapterHeading: false,
+          },
         }),
       );
       expect(publishMock).toHaveBeenCalledTimes(1);
       const patch = publishMock.mock.calls[0]![1].patch as Partial<SystemSettings>;
       expect(patch.kosync?.password).toBe('hunter2');
+      expect(patch.notion?.databaseId).toBe('notion-database-id');
+      expect(patch.notion?.accessToken).toBe('notion-token');
     });
 
     test('omits WebDAV credentials but keeps serverUrl/rootPath when credentials sync is OFF (issue #4810)', async () => {
@@ -443,6 +525,7 @@ describe('publishSettingsIfChanged', () => {
     expect(patch.kosync?.password).toBeUndefined();
     expect(patch.readwise?.accessToken).toBeUndefined();
     expect(patch.hardcover?.accessToken).toBeUndefined();
+    expect(patch.notion?.accessToken).toBeUndefined();
   });
 
   test('initSettingsSync(initialSettings) primes the snapshot so structural disk defaults do not re-push', async () => {
@@ -690,6 +773,39 @@ describe('applyRemoteSettings', () => {
     expect(merged.syncBooks).toBe(true);
   });
 
+  test('deep-merges Notion credentials without clobbering local sync state', () => {
+    const env = makeEnvConfig();
+    useSettingsStore.setState({
+      ...useSettingsStore.getState(),
+      settings: makeSettings({
+        notion: {
+          enabled: true,
+          accessToken: 'old-token',
+          databaseId: 'old-database',
+          lastSyncedAt: 999,
+          includeChapterHeading: false,
+        },
+      }),
+    });
+
+    applyRemoteSettings(env, {
+      name: 'singleton',
+      patch: {
+        notion: {
+          accessToken: 'new-token',
+          databaseId: 'new-database',
+        },
+      } as unknown as Partial<SystemSettings>,
+    });
+
+    const merged = useSettingsStore.getState().settings.notion;
+    expect(merged.accessToken).toBe('new-token');
+    expect(merged.databaseId).toBe('new-database');
+    expect(merged.enabled).toBe(true);
+    expect(merged.lastSyncedAt).toBe(999);
+    expect(merged.includeChapterHeading).toBe(false);
+  });
+
   test('deep-merges S3 credentials without clobbering local per-device fields', () => {
     const env = makeEnvConfig();
     useSettingsStore.setState({
@@ -772,6 +888,75 @@ describe('applyRemoteSettings', () => {
       { id: 'web:remote-y', name: 'Y', urlTemplate: 'https://y/?q=%WORD%' },
     ]);
     expect(dictMirror.defaultProviderId).toBe('local-x');
+  });
+
+  test('does NOT apply remote dictionarySettings when the dictionary category is OFF (issue #5465)', async () => {
+    const { useCustomDictionaryStore } = await import('@/store/customDictionaryStore');
+    const localDict = {
+      providerOrder: ['local-x'],
+      providerEnabled: { 'local-x': true },
+      defaultProviderId: 'local-x',
+      webSearches: [],
+    };
+    useSettingsStore.setState({
+      ...useSettingsStore.getState(),
+      settings: makeSettings({ dictionarySettings: localDict } as Partial<SystemSettings>),
+    });
+    setDictionarySync(false);
+    useCustomDictionaryStore.setState({
+      ...useCustomDictionaryStore.getState(),
+      settings: { ...localDict },
+    });
+
+    applyRemoteSettings(makeEnvConfig(), {
+      name: 'singleton',
+      patch: {
+        dictionarySettings: {
+          providerOrder: ['remote-y'],
+          providerEnabled: { 'remote-y': true },
+          webSearches: [{ id: 'web:remote-y', name: 'Y', urlTemplate: 'https://y/?q=%WORD%' }],
+        },
+        globalReadSettings: { userHighlightColors: [{ name: 'mint', color: '#a8e6cf' }] },
+      } as unknown as Partial<SystemSettings>,
+    });
+
+    const merged = useSettingsStore.getState().settings;
+    expect(merged.dictionarySettings.providerOrder).toEqual(['local-x']);
+    expect(merged.dictionarySettings.providerEnabled).toEqual({ 'local-x': true });
+    expect(merged.dictionarySettings.webSearches).toEqual([]);
+    // Non-dictionary fields on the same row still apply.
+    expect(merged.globalReadSettings.userHighlightColors).toEqual([
+      { name: 'mint', color: '#a8e6cf' },
+    ]);
+    // The dictionary panel / reader popup mirror stays on the local values.
+    expect(useCustomDictionaryStore.getState().settings.providerOrder).toEqual(['local-x']);
+  });
+
+  test('a dictionary-only remote patch is a no-op when the category is OFF', () => {
+    useSettingsStore.setState({
+      ...useSettingsStore.getState(),
+      settings: makeSettings({
+        dictionarySettings: {
+          providerOrder: ['local-x'],
+          providerEnabled: { 'local-x': true },
+          webSearches: [],
+        },
+      } as Partial<SystemSettings>),
+    });
+    setDictionarySync(false);
+    const before = useSettingsStore.getState().settings;
+    applyRemoteSettings(makeEnvConfig(), {
+      name: 'singleton',
+      patch: {
+        dictionarySettings: {
+          providerOrder: ['remote-y'],
+          providerEnabled: { 'remote-y': true },
+          webSearches: [],
+        },
+      } as unknown as Partial<SystemSettings>,
+    });
+    expect(useSettingsStore.getState().settings).toBe(before);
+    expect(useSettingsStore.getState().saveSettings).not.toHaveBeenCalled();
   });
 
   test('deep-merges dictionarySettings without clobbering local fields', () => {

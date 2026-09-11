@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   MdAlarm,
   MdArrowBackIosNew,
@@ -12,12 +12,13 @@ import {
   MdPlayArrow,
   MdOutlineFileDownload,
   MdChevronRight,
+  MdSkipNext,
+  MdSkipPrevious,
 } from 'react-icons/md';
-import { RiVoiceAiFill } from 'react-icons/ri';
+import { RiForward30Line, RiReplay15Line, RiVoiceAiFill } from 'react-icons/ri';
 import { useRouter } from 'next/navigation';
 import { TTSVoicesGroup } from '@/services/tts';
-import { DEFAULT_SENTENCE_GAP_SEC } from '@/services/tts/EdgeTTSClient';
-import { DEFAULT_PARAGRAPH_GAP_SEC } from '@/services/tts/TTSController';
+import { MEDIA_OVERLAY_VOICE_ID } from '@/services/tts/mediaOverlay';
 import { useEnv } from '@/context/EnvContext';
 import { useAuth } from '@/context/AuthContext';
 import { useReaderStore } from '@/store/readerStore';
@@ -32,26 +33,26 @@ import { navigateToLogin, navigateToProfile } from '@/utils/nav';
 import { getLanguageName } from '@/utils/lang';
 import { formatPlaybackTime } from '@/utils/time';
 import Dialog from '@/components/Dialog';
+import { PageInfo } from '@/types/book';
 import { TTSPlaybackInfo } from './usePlaybackInfo';
 import { useCountdownLabel } from './useCountdownLabel';
 import TTSScrubber from './TTSScrubber';
+import TTSLyricsView from './TTSLyricsView';
+import BufferingRing from './BufferingRing';
+import { TTSLyrics, useTTSLyrics } from './useTTSLyrics';
 import SpeedRuler, { formatRate } from './SpeedRuler';
-import TickRuler from './TickRuler';
 import TTSChaptersView from './TTSChaptersView';
+import { TTS_STOP_AT_CHAPTER_END } from '@/services/tts/TTSSessionManager';
 import type { UseTTSDownloadsResult } from '@/app/reader/hooks/useTTSDownloads';
 
 type SheetView = 'main' | 'speed' | 'voice' | 'timer' | 'chapters';
 
-export const formatGap = (sec: number) => `${parseFloat(sec.toFixed(2))}s`;
-
-// Pause ruler configurations: 0.05s steps keep every legacy chip preset
-// reachable (sentence 0-0.6s, paragraph 0-2s).
-const SENTENCE_PAUSE_MARKS = [0, 0.2, 0.4, 0.6];
-const PARAGRAPH_PAUSE_MARKS = [0, 0.5, 1, 1.5, 2];
-
-const getTTSTimeoutOptions = (_: TranslationFunc) => {
+// Exported so the audiobook player route (src/app/player/components/PlayerView.tsx)
+// can reuse the same sleep-timer preset list instead of duplicating it.
+export const getTTSTimeoutOptions = (_: TranslationFunc) => {
   return [
     { label: _('No Timeout'), value: 0 },
+    { label: _('End of Chapter'), value: TTS_STOP_AT_CHAPTER_END },
     { label: _('{{value}} minute', { value: 1 }), value: 60 },
     { label: _('{{value}} minutes', { value: 3 }), value: 180 },
     { label: _('{{value}} minutes', { value: 5 }), value: 300 },
@@ -74,7 +75,10 @@ type TTSPlayerSheetProps = {
   ttsLang: string;
   isPlaying: boolean;
   hasTimeline: boolean;
-  hasGapControl: boolean;
+  // Paired audiobook: the transport skips 30s forward / 15s back through the
+  // recording and moves by audiobook chapter instead of by sentence and
+  // paragraph.
+  audioTransport: boolean;
   timeoutOption: number;
   timeoutTimestamp: number;
   chapterRemainingSec: number | null;
@@ -83,8 +87,6 @@ type TTSPlayerSheetProps = {
   onBackward: (byMark: boolean) => void;
   onForward: (byMark: boolean) => void;
   onSetRate: (rate: number) => void;
-  onSetSentenceGap: (sec: number) => void;
-  onSetParagraphGap: (sec: number) => void;
   onGetVoices: (lang: string) => Promise<TTSVoicesGroup[]>;
   onSetVoice: (voice: string, lang: string) => void;
   onGetVoiceId: () => string;
@@ -92,6 +94,15 @@ type TTSPlayerSheetProps = {
   onSeek: (seconds: number) => Promise<void>;
   onSeekPreview: (seconds: number) => void;
   onGetPlaybackInfo: () => TTSPlaybackInfo | null;
+  // Lyric view (#5755). Present only when the engine aligns audio to the text;
+  // supportsLyrics false keeps the cover player.
+  supportsLyrics: boolean;
+  // Playing, but nothing audible yet — the transport button wears a ring.
+  buffering: boolean;
+  onGetLyrics: () => Promise<TTSLyrics | null>;
+  onGetActiveIndex: () => number;
+  onGetLyricPage: (index: number) => Promise<PageInfo | null>;
+  onPlayFromLyric: (index: number) => Promise<void>;
   downloads: UseTTSDownloadsResult;
   activeSectionIndex: number | null;
 };
@@ -105,7 +116,7 @@ const TTSPlayerSheet = ({
   ttsLang,
   isPlaying,
   hasTimeline,
-  hasGapControl,
+  audioTransport,
   timeoutOption,
   timeoutTimestamp,
   chapterRemainingSec,
@@ -114,8 +125,6 @@ const TTSPlayerSheet = ({
   onBackward,
   onForward,
   onSetRate,
-  onSetSentenceGap,
-  onSetParagraphGap,
   onGetVoices,
   onSetVoice,
   onGetVoiceId,
@@ -123,6 +132,12 @@ const TTSPlayerSheet = ({
   onSeek,
   onSeekPreview,
   onGetPlaybackInfo,
+  supportsLyrics,
+  buffering,
+  onGetLyrics,
+  onGetActiveIndex,
+  onGetLyricPage,
+  onPlayFromLyric,
   downloads,
   activeSectionIndex,
 }: TTSPlayerSheetProps) => {
@@ -139,21 +154,22 @@ const TTSPlayerSheet = ({
   // feature: any paid plan can use it; free / signed-out users see the row with
   // a Premium badge that routes to the upgrade page instead of the per-chapter
   // download controls. Mirrors the cloud-sync paywall in IntegrationsPanel.
-  const { userProfilePlan } = useQuotaStats();
-  const isDownloadPremium = isTTSCacheAllowed(userProfilePlan ?? 'free');
+  const { userProfilePlan, customizationPurchased } = useQuotaStats();
+  const isDownloadPremium = isTTSCacheAllowed(userProfilePlan ?? 'free', customizationPurchased);
   // Only badge users who can't use it yet: signed out (known at once), or a
   // resolved plan without the feature. Suppress it while a signed-in user's
   // plan is still loading so it never flashes at an entitled user.
   const premiumBadge =
     !user || (userProfilePlan !== undefined && !isDownloadPremium) ? _('Premium') : undefined;
 
+  // A book can carry a coverImageUrl that no longer resolves (cover never
+  // extracted, file pruned). A broken <img> still occupies its h-32 box, so
+  // drop it from the layout entirely rather than leaving a blank band above
+  // the title.
+  const [coverFailed, setCoverFailed] = useState(false);
   const [view, setView] = useState<SheetView>('main');
   const [voiceGroups, setVoiceGroups] = useState<TTSVoicesGroup[]>([]);
   const [rate, setRate] = useState(viewSettings?.ttsRate ?? 1.0);
-  const [gap, setGap] = useState(viewSettings?.ttsSentenceGap ?? DEFAULT_SENTENCE_GAP_SEC);
-  const [paragraphGap, setParagraphGap] = useState(
-    viewSettings?.ttsParagraphGap ?? DEFAULT_PARAGRAPH_GAP_SEC,
-  );
   const [selectedVoice, setSelectedVoice] = useState('');
   const timerLabel = useCountdownLabel(timeoutTimestamp);
   const iconSize18 = useResponsiveSize(18);
@@ -162,16 +178,49 @@ const TTSPlayerSheet = ({
   const iconSize32 = useResponsiveSize(32);
 
   const book = getBookData(bookKey)?.book;
-  const sectionLabel = progress?.sectionLabel;
+  const sectionLabel = useMemo(() => {
+    if (activeSectionIndex === null || activeSectionIndex < 0) {
+      return progress?.sectionLabel;
+    }
+
+    const chapter = downloads.chapters.find(
+      ({ startSection, endSection }) =>
+        Number.isInteger(startSection) &&
+        Number.isInteger(endSection) &&
+        startSection >= 0 &&
+        endSection > startSection &&
+        activeSectionIndex >= startSection &&
+        activeSectionIndex < endSection,
+    );
+    const chapterLabel = chapter?.label.trim();
+    return chapterLabel || _('Section {{index}}', { index: activeSectionIndex + 1 });
+  }, [_, activeSectionIndex, downloads.chapters, progress?.sectionLabel]);
   const isEink = viewSettings?.isEink ?? false;
+  const coverImage = book?.coverImageUrl && !coverFailed ? book.coverImageUrl : null;
+
+  const lyrics = useTTSLyrics({
+    bookKey,
+    enabled: supportsLyrics && isOpen,
+    onGetLyrics,
+    onGetActiveIndex,
+  });
+  // Committed up front on capability alone so the sheet does not flip layouts a
+  // frame after opening; `unavailable` only pulls it back for the sections that
+  // genuinely have no sheet to show (empty, or too long to render).
+  const showLyrics = supportsLyrics && !lyrics.unavailable;
+
+  // Books with recorded narration expose it as a voice; while it is playing
+  // there is nothing to pre-download, since the audio ships with the book.
+  const hasNarrationVoice = voiceGroups.some((group) =>
+    group.voices.some((voice) => voice.id === MEDIA_OVERLAY_VOICE_ID),
+  );
+  const isNarrating = selectedVoice === MEDIA_OVERLAY_VOICE_ID;
 
   // Fresh open: land on the main view with current rate/voice.
   useEffect(() => {
     if (!isOpen) return;
     setView('main');
     setRate(getViewSettings(bookKey)?.ttsRate ?? 1.0);
-    setGap(getViewSettings(bookKey)?.ttsSentenceGap ?? DEFAULT_SENTENCE_GAP_SEC);
-    setParagraphGap(getViewSettings(bookKey)?.ttsParagraphGap ?? DEFAULT_PARAGRAPH_GAP_SEC);
     setSelectedVoice(onGetVoiceId());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
@@ -199,7 +248,11 @@ const TTSPlayerSheet = ({
 
   const handleSelectRate = (value: number) => {
     setRate(value);
+    // The pauses are derived from the rate and persisted by onSetRate's handler
+    // — every entry point that changes the rate has to re-derive them, so only
+    // one of them may own it (#5750).
     onSetRate(value);
+
     const vs = getViewSettings(bookKey)!;
     vs.ttsRate = value;
     setViewSettings(bookKey, vs);
@@ -211,39 +264,17 @@ const TTSPlayerSheet = ({
     saveSettings(envConfig, settings);
   };
 
-  const handleSelectGap = (value: number) => {
-    setGap(value);
-    onSetSentenceGap(value);
-    const vs = getViewSettings(bookKey)!;
-    vs.ttsSentenceGap = value;
-    setViewSettings(bookKey, vs);
-    // Read the store fresh at call time: a `settings` captured at render goes
-    // stale if anything else persisted settings since this sheet mounted.
-    const { settings, setSettings, saveSettings } = useSettingsStore.getState();
-    settings.globalViewSettings.ttsSentenceGap = value;
-    setSettings(settings);
-    saveSettings(envConfig, settings);
-  };
-
-  const handleSelectParagraphGap = (value: number) => {
-    setParagraphGap(value);
-    onSetParagraphGap(value);
-    const vs = getViewSettings(bookKey)!;
-    vs.ttsParagraphGap = value;
-    setViewSettings(bookKey, vs);
-    // Read the store fresh at call time: a `settings` captured at render goes
-    // stale if anything else persisted settings since this sheet mounted.
-    const { settings, setSettings, saveSettings } = useSettingsStore.getState();
-    settings.globalViewSettings.ttsParagraphGap = value;
-    setSettings(settings);
-    saveSettings(envConfig, settings);
-  };
-
   const handleSelectVoice = (voice: string, lang: string) => {
     onSetVoice(voice, lang);
     setSelectedVoice(voice);
     const vs = getViewSettings(bookKey)!;
     vs.ttsVoice = voice;
+    // Remember per book whether the reader wants its own narrator or a
+    // synthetic voice; ttsVoice alone can't say, since it inherits the global
+    // default. Only written for books that offer narration at all.
+    if (hasNarrationVoice) {
+      vs.ttsUseNarration = voice === MEDIA_OVERLAY_VOICE_ID;
+    }
     setViewSettings(bookKey, vs);
     setView('main');
   };
@@ -272,21 +303,35 @@ const TTSPlayerSheet = ({
   const currentVoiceName = voiceGroups
     .flatMap((group) => group.voices)
     .find((voice) => voice.id === selectedVoice)?.name;
-  // Armed timer shows its live countdown on the button; otherwise the button
-  // just names itself (the alarm icon already carries the affordance).
-  const timerCaption = timeoutOption > 0 && timerLabel ? timerLabel : _('Sleep Timer');
+  // Armed timer shows its live countdown on the button; the chapter-end mode
+  // has no countdown so it just names itself; otherwise the button falls
+  // back to naming the feature (the alarm icon already carries the
+  // affordance).
+  const timerCaption =
+    timeoutOption === TTS_STOP_AT_CHAPTER_END
+      ? _('End of Chapter')
+      : timeoutOption > 0 && timerLabel
+        ? timerLabel
+        : _('Sleep Timer');
 
   // The main view carries no header label (the content speaks for itself and
   // vertical space is tight); sub-views keep the back button and their title.
   // Desktop hides the drag handle and has no swipe-to-dismiss, so the main
   // view floats the standard dialog close pill over its top-right corner.
+  // Transport labels by step size: sentence and paragraph for speech, time
+  // skip and audiobook chapter for a paired recording.
+  const prevLargeLabel = audioTransport ? _('Previous Chapter') : _('Previous Paragraph');
+  const prevSmallLabel = audioTransport ? _('Back 15 Seconds') : _('Previous Sentence');
+  const nextSmallLabel = audioTransport ? _('Forward 30 Seconds') : _('Next Sentence');
+  const nextLargeLabel = audioTransport ? _('Next Chapter') : _('Next Paragraph');
+
   const header =
     view === 'main' ? (
       <button
         type='button'
         aria-label={_('Close')}
         onClick={onClose}
-        className='bg-base-300/65 btn btn-ghost btn-circle absolute end-3 top-1 z-10 hidden h-6 min-h-6 w-6 focus:outline-none sm:flex'
+        className='bg-base-300/65 btn btn-ghost btn-circle absolute end-3 top-1 z-10 hidden h-6 min-h-6 w-6 focus:outline-hidden sm:flex'
       >
         <svg xmlns='http://www.w3.org/2000/svg' width='1em' height='1em' viewBox='0 0 24 24'>
           <path
@@ -301,7 +346,7 @@ const TTSPlayerSheet = ({
           type='button'
           aria-label={_('Go Back')}
           onClick={() => setView('main')}
-          className='btn btn-ghost btn-circle z-10 flex h-8 min-h-8 w-8 hover:bg-transparent focus:outline-none'
+          className='btn btn-ghost btn-circle z-10 flex h-8 min-h-8 w-8 hover:bg-transparent focus:outline-hidden'
         >
           <MdArrowBackIosNew size={iconSize24 * 0.8} className='rtl:rotate-180' />
         </button>
@@ -323,32 +368,73 @@ const TTSPlayerSheet = ({
     <Dialog
       id='tts_player_sheet'
       isOpen={isOpen}
-      snapHeight={0.65}
+      // The lyric sheet needs room to read as one: at the cover player's 0.65
+      // it collapses to two or three visible lines.
+      snapHeight={showLyrics ? 0.8 : 0.65}
       title={_('Read Aloud')}
       header={header}
-      boxClassName='sm:!h-auto sm:!max-h-[85%] sm:!w-[420px] sm:!min-w-0'
-      contentClassName='!px-4 sm:!px-4 mt-[-4px]'
+      boxClassName='sm:h-auto! sm:max-h-[85%]! sm:w-[420px]! sm:min-w-0!'
+      contentClassName='px-4! sm:px-4! mt-[-4px]'
       onClose={onClose}
     >
       {view === 'main' && (
         // sm:pt-4 keeps the cover clear of the box's rounded top edge on
         // desktop, where the mobile drag handle (and its clearance) is
         // hidden; on mobile the handle already provides the gap.
-        <div className='flex w-full flex-col items-center gap-4 pb-4 sm:pt-4'>
-          {book?.coverImageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={book.coverImageUrl}
-              alt=''
-              className='not-eink:shadow-lg eink-bordered h-32 w-auto rounded-xl object-cover'
-            />
-          ) : null}
-          <div className='flex w-full flex-col items-center gap-0.5 text-center'>
-            <span className='line-clamp-1 font-semibold'>{book?.title ?? ''}</span>
-            {sectionLabel && (
-              <span className='text-base-content/70 line-clamp-1 text-sm'>{sectionLabel}</span>
+        <div
+          className={clsx(
+            'flex w-full flex-col items-center gap-4 pb-4 sm:pt-4',
+            // The lyric sheet is the one element here that can take whatever
+            // height is left, so it claims it — and the transport below stays
+            // put instead of being pushed into a scroll.
+            showLyrics && 'h-full sm:h-auto',
+          )}
+        >
+          {/* With lyrics the artwork steps aside into a thumbnail row so the
+              transcript gets the vertical space; without them the cover keeps
+              the full-width billing it has always had. */}
+          <div
+            className={clsx(
+              'flex w-full min-w-0',
+              showLyrics ? 'flex-row items-center gap-3' : 'flex-col items-center gap-4',
             )}
+          >
+            {coverImage && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={coverImage}
+                alt=''
+                className={clsx(
+                  'not-eink:shadow-lg eink-bordered w-auto shrink-0 rounded-xl object-cover',
+                  showLyrics ? 'h-12' : 'h-32',
+                )}
+                onError={() => setCoverFailed(true)}
+              />
+            )}
+            <div
+              className={clsx(
+                'flex min-w-0 flex-col gap-0.5',
+                showLyrics ? 'flex-1 items-start text-start' : 'w-full items-center text-center',
+              )}
+            >
+              <span className='line-clamp-1 w-full font-semibold'>{book?.title ?? ''}</span>
+              {sectionLabel && (
+                <span className='text-base-content/70 line-clamp-1 w-full text-sm'>
+                  {sectionLabel}
+                </span>
+              )}
+            </div>
           </div>
+          {showLyrics && (
+            <TTSLyricsView
+              lines={lyrics.lines}
+              activeIndex={lyrics.activeIndex}
+              buffering={buffering}
+              isEink={isEink}
+              onGetLyricPage={onGetLyricPage}
+              onPlayFrom={onPlayFromLyric}
+            />
+          )}
           {hasTimeline ? (
             <TTSScrubber
               bookKey={bookKey}
@@ -368,46 +454,66 @@ const TTSPlayerSheet = ({
             <button
               type='button'
               className='rounded-full p-2'
-              title={_('Previous Paragraph')}
-              aria-label={_('Previous Paragraph')}
+              title={prevLargeLabel}
+              aria-label={prevLargeLabel}
               onClick={() => onBackward(false)}
             >
-              <MdKeyboardDoubleArrowLeft size={iconSize24} />
+              {audioTransport ? (
+                <MdSkipPrevious size={iconSize24} />
+              ) : (
+                <MdKeyboardDoubleArrowLeft size={iconSize24} />
+              )}
             </button>
             <button
               type='button'
               className='rounded-full p-2'
-              title={_('Previous Sentence')}
-              aria-label={_('Previous Sentence')}
+              title={prevSmallLabel}
+              aria-label={prevSmallLabel}
               onClick={() => onBackward(true)}
             >
-              <MdKeyboardArrowLeft size={iconSize28} />
+              {audioTransport ? (
+                <RiReplay15Line size={iconSize24} />
+              ) : (
+                <MdKeyboardArrowLeft size={iconSize28} />
+              )}
             </button>
             <button
               type='button'
-              className='btn btn-primary btn-circle mx-2 h-14 min-h-14 w-14'
+              className='btn btn-primary btn-circle relative mx-2 h-14 min-h-14 w-14'
               aria-label={isPlaying ? _('Pause') : _('Play')}
+              aria-busy={buffering}
               onClick={onTogglePlay}
             >
               {isPlaying ? <MdOutlinePause size={iconSize32} /> : <MdPlayArrow size={iconSize32} />}
+              {/* Inside the button's edge, so it reads against the fill rather
+                  than against whatever the sheet puts behind it. */}
+              {buffering && <BufferingRing size={50} isEink={isEink} />}
             </button>
             <button
               type='button'
               className='rounded-full p-2'
-              title={_('Next Sentence')}
-              aria-label={_('Next Sentence')}
+              title={nextSmallLabel}
+              aria-label={nextSmallLabel}
               onClick={() => onForward(true)}
             >
-              <MdKeyboardArrowRight size={iconSize28} />
+              {audioTransport ? (
+                <RiForward30Line size={iconSize24} />
+              ) : (
+                <MdKeyboardArrowRight size={iconSize28} />
+              )}
             </button>
             <button
               type='button'
               className='rounded-full p-2'
-              title={_('Next Paragraph')}
-              aria-label={_('Next Paragraph')}
+              title={nextLargeLabel}
+              aria-label={nextLargeLabel}
               onClick={() => onForward(false)}
             >
-              <MdKeyboardDoubleArrowRight size={iconSize24} />
+              {audioTransport ? (
+                <MdSkipNext size={iconSize24} />
+              ) : (
+                <MdKeyboardDoubleArrowRight size={iconSize24} />
+              )}
             </button>
           </div>
           <div className='flex w-full gap-2'>
@@ -430,7 +536,7 @@ const TTSPlayerSheet = ({
             >
               <RiVoiceAiFill size={iconSize18} />
               <span className='text-base-content/60 max-w-full truncate px-1 text-xs'>
-                {currentVoiceName ?? _('Voice')}
+                {currentVoiceName ? _(currentVoiceName) : _('Voice')}
               </span>
             </button>
             <button
@@ -445,7 +551,7 @@ const TTSPlayerSheet = ({
               </span>
             </button>
           </div>
-          {downloads.supported && downloads.chapters.length > 0 && (
+          {!isNarrating && downloads.supported && downloads.chapters.length > 0 && (
             <button
               type='button'
               aria-label={_('Offline Audio')}
@@ -483,38 +589,6 @@ const TTSPlayerSheet = ({
       {view === 'speed' && (
         <div className='flex w-full flex-col items-center pb-4 pt-2'>
           <SpeedRuler rate={rate} onSelect={handleSelectRate} />
-          {hasGapControl && (
-            <>
-              <div className='text-base-content/60 w-full px-2 py-1 text-sm sm:text-xs'>
-                {_('Sentence Pause')}
-              </div>
-              <TickRuler
-                min={0}
-                max={0.6}
-                step={0.05}
-                marks={SENTENCE_PAUSE_MARKS}
-                value={gap}
-                ariaLabel={_('Sentence Pause')}
-                formatValue={formatGap}
-                formatMark={formatGap}
-                onSelect={handleSelectGap}
-              />
-            </>
-          )}
-          <div className='text-base-content/60 w-full px-2 py-1 text-sm sm:text-xs'>
-            {_('Paragraph Pause')}
-          </div>
-          <TickRuler
-            min={0}
-            max={2}
-            step={0.05}
-            marks={PARAGRAPH_PAUSE_MARKS}
-            value={paragraphGap}
-            ariaLabel={_('Paragraph Pause')}
-            formatValue={formatGap}
-            formatMark={formatGap}
-            onSelect={handleSelectParagraphGap}
-          />
         </div>
       )}
       {view === 'voice' && (
@@ -522,10 +596,14 @@ const TTSPlayerSheet = ({
           {voiceGroups.map((voiceGroup) => (
             <div key={voiceGroup.id}>
               <div className='text-base-content/60 px-2 py-1 text-sm sm:text-xs'>
-                {_('{{engine}}: {{count}} voices', {
-                  engine: _(voiceGroup.name),
-                  count: voiceGroup.voices.length,
-                })}
+                {/* A single-voice group (a book's own narrator) would otherwise
+                    read "Narration: 1 voices". */}
+                {voiceGroup.voices.length === 1
+                  ? _(voiceGroup.name)
+                  : _('{{engine}}: {{count}} voices', {
+                      engine: _(voiceGroup.name),
+                      count: voiceGroup.voices.length,
+                    })}
               </div>
               {voiceGroup.voices.map((voice) => (
                 <button
