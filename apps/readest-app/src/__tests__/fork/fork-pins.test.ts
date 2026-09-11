@@ -13,11 +13,13 @@ import { buildAuthHeaders } from '@/services/sync/providers/webdav/client';
  * the build working. Upstream ships a release roughly every two weeks and this
  * fork merges them.
  *
- * Every pin below has already survived two upstream merges — but one of them
+ * Every pin below has already survived three upstream merges — but one of them
  * silently CHANGED FILES during the v0.11.20 merge (the library transient
  * filter moved from useLibraryFileSync into runLibrarySync), and the WebDAV
- * readiness check was refactored out from under its patch. That is exactly how
- * a pin gets lost: not deleted deliberately, just quietly refactored away.
+ * readiness check was refactored out from under its patch. The v0.12.8 merge
+ * rewrote assetBundler's fetch loop around the fork's image-proxy flag and
+ * dropped the router the library Feeds button navigates with. That is exactly
+ * how a pin gets lost: not deleted deliberately, just quietly refactored away.
  *
  * If a pin is lost, the failure is SILENT and severe — sync simply stops, or
  * feed articles pollute the shelf again. These tests make it LOUD instead.
@@ -174,5 +176,51 @@ describe('fork pin: build-time self-hosting config', () => {
     expect(src).toMatch(/NEXT_PUBLIC_WEBDAV_ENABLED/);
     expect(src).toMatch(/NEXT_PUBLIC_WEBDAV_URL/);
     expect(src).toMatch(/NEXT_PUBLIC_FRESHRSS_ENABLED/);
+  });
+});
+
+describe('fork pin: FreshRSS feature wiring inside upstream files', () => {
+  // These are the fork's own feature, not a behavioural patch — but every one
+  // of them lives inside a file upstream edits constantly, and each of the
+  // v0.11.18 / v0.11.20 / v0.12.8 merges conflicted on at least one of them.
+
+  test('feed article images are fetched through the same-origin proxy on web', () => {
+    // Plain web builds are CORS-blocked on cross-origin images; without the
+    // proxy flag every feed article renders with broken pictures.
+    const src = read('services/send/conversion/assetBundler.ts');
+    expect(src).toMatch(/useProxy\?: boolean/);
+    expect(src).toMatch(/\/api\/img\?url=/);
+    expect(read('services/freshrss/articleDoc.ts')).toMatch(/useProxy: true/);
+  });
+
+  test('the reader mounts the feed Done / Save buttons', () => {
+    const src = read('app/reader/components/ReaderContent.tsx');
+    expect(src).toMatch(/<FeedDoneButton /);
+    expect(src).toMatch(/<FeedSaveButton /);
+  });
+
+  test('the library header can navigate to /feeds', () => {
+    expect(read('app/library/components/LibraryHeader.tsx')).toMatch(/router\.push\('\/feeds'\)/);
+  });
+
+  test('settings expose the FreshRSS integration sub-page', () => {
+    const src = read('components/settings/IntegrationsPanel.tsx');
+    expect(src).toMatch(/requestedSubPage === 'freshrss'/);
+    expect(src).toMatch(/freshrssStatus/);
+  });
+
+  test('FreshRSS settings exist in the settings type and defaults', () => {
+    expect(read('types/settings.ts')).toMatch(/freshrss: FreshRSSSettings;/);
+    expect(read('services/constants.ts')).toMatch(/freshrss: DEFAULT_FRESHRSS_SETTINGS,/);
+  });
+
+  test('the bundled reading fonts are declared in the global stylesheet', () => {
+    // Atkinson Hyperlegible + Heebo (RSVP) and Open Sans (feeds UI, Hebrew)
+    // are self-hosted woff2 so reading works offline, with no Google CDN.
+    const css = read('styles/globals.css');
+    for (const face of ['Atkinson Hyperlegible', 'Heebo', 'Open Sans']) {
+      expect(css).toContain(`font-family: '${face}';`);
+    }
+    expect(css).toMatch(/url\('\/fonts\/Heebo-400\.woff2'\)/);
   });
 });
