@@ -97,7 +97,11 @@ const wordCount = (a: FreshRSSArticle) => {
   return t ? t.split(/\s+/).length : 0;
 };
 
-const QUICK_VIEW_MAX = 700;
+// Cap for the quick-view blurb. Feeds that shape their own lead block (the
+// Telegram channels: first paragraph, joined with the next when short, the
+// whole post when under 300 words) rely on the first <p> arriving intact —
+// 300 Hebrew words is ~1,800 characters, so 700 cut every such post mid-way.
+const QUICK_VIEW_MAX = 2400;
 
 /** Whether the feed gives this article a genuine blurb (a summary that's a real
  *  excerpt, shorter than the full content) vs. only full text. Blurb-less
