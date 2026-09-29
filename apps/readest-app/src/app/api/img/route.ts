@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import sharp from 'sharp';
+import { isBlockedHost } from '@/utils/network';
 
 // Server-side image proxy for the FreshRSS article view. The browser can't
 // fetch third-party article images (CORS), so the asset bundler routes its
@@ -9,7 +10,8 @@ import sharp from 'sharp';
 //
 // Reachable only behind the app's auth gate (Caddy basic_auth), so it isn't a
 // public open proxy; we still enforce http(s) + an image content-type + a size
-// cap + a block-list for private/link-local hosts (basic SSRF hygiene).
+// cap + upstream's canonical SSRF host block-list (`utils/network`, shared with
+// /api/opds/proxy, /api/kosync, /api/send/fetch-url), re-checked on every hop.
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const TIMEOUT_MS = 10_000;
@@ -23,20 +25,6 @@ const WEBP_QUALITY = Number(process.env['IMG_QUALITY']) || 72;
 // Only raster formats sharp can resize cleanly; SVG (vector) and GIF (possibly
 // animated) pass through untouched.
 const RESIZABLE = /^image\/(jpe?g|png|webp|avif)$/;
-
-export const isBlockedHost = (host: string): boolean => {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h.endsWith('.localhost')) return true;
-  if (h === '0.0.0.0' || h === '::1' || h === '::') return true;
-  if (/^127\./.test(h)) return true;
-  if (/^10\./.test(h)) return true;
-  if (/^192\.168\./.test(h)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-  if (/^169\.254\./.test(h)) return true; // link-local + cloud metadata
-  if (/^(fc|fd)[0-9a-f]{2}:/.test(h)) return true; // ULA IPv6
-  if (/^fe80:/.test(h)) return true; // link-local IPv6
-  return false;
-};
 
 /**
  * Read a response body, aborting as soon as it exceeds `max` bytes. A server

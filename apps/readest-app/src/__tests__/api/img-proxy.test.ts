@@ -24,7 +24,7 @@ vi.mock('sharp', () => {
   return { default: () => chain };
 });
 
-const { GET, isBlockedHost } = await import('@/app/api/img/route');
+const { GET } = await import('@/app/api/img/route');
 
 const PNG = 'image/png';
 const fetchMock = vi.fn();
@@ -43,42 +43,21 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-describe('isBlockedHost', () => {
+// The host list itself is upstream's `utils/network` isBlockedHost (tested in
+// network-ssrf-hardening.test.ts). What matters here is that the proxy uses it:
+// these are hosts the fork's old local copy let through.
+describe('/api/img — uses the shared SSRF block-list', () => {
   test.each([
-    'localhost',
-    'app.localhost',
-    '127.0.0.1',
-    '127.1.2.3',
-    '0.0.0.0',
-    '10.0.0.5',
-    '192.168.1.1',
-    '172.16.0.1',
-    '172.31.255.255',
-    '169.254.169.254', // cloud metadata
-    '::1',
-    '[::1]',
-    'fe80::1',
-    'fd00::1',
-    'fc00::1',
-  ])('blocks %s', (host) => {
-    expect(isBlockedHost(host)).toBe(true);
-  });
-
-  test.each([
-    'example.com',
-    'images.nytimes.com',
-    '8.8.8.8',
-    '172.32.0.1', // just outside the private range
-    '172.15.0.1',
-    '11.0.0.1',
-    '169.253.0.1',
-    '2606:4700::1',
-  ])('allows %s', (host) => {
-    expect(isBlockedHost(host)).toBe(false);
-  });
-
-  test('is case-insensitive', () => {
-    expect(isBlockedHost('LOCALHOST')).toBe(true);
+    'http://100.64.0.1/a.png', // CGNAT / Tailscale
+    'http://[::ffff:127.0.0.1]/a.png', // IPv4-mapped loopback
+    'http://nas.local/a.png',
+    'http://router.lan/a.png',
+    'http://intranet/a.png', // bare single-label name
+  ])('refuses %s without contacting it', async (url) => {
+    const r = await GET(req(url));
+    expect(r.status).toBe(400);
+    expect(await r.json()).toMatchObject({ error: 'blocked host' });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
