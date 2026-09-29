@@ -1103,3 +1103,39 @@ describe('RSVPOverlay — per-word direction in a chunk (#C7)', () => {
 // FORK: upstream's fine-grained WPM entry (#5820) lives inside the WPM dropdown,
 // which this fork replaced with an always-visible slider (rsvp-wpm-slider), so
 // those dropdown tests do not apply here.
+
+// FORK: the overlay pauses when the reader can't see it. The 0.12.8 Tailwind
+// rename pass rewrote the window event name 'blur' to 'blur-sm' (a class
+// token), which silently disabled the focus-loss half of this.
+describe('RSVPOverlay — auto-pause when unseen', () => {
+  afterEach(() => cleanup());
+
+  const playing = () =>
+    buildState({
+      playing: true,
+      words: [{ text: 'hello', orpIndex: 1, pauseMultiplier: 1 }],
+    });
+
+  test('pauses when the window loses focus', () => {
+    const { controller } = renderOverlay(playing());
+    window.dispatchEvent(new Event('blur'));
+    expect(controller.pause).toHaveBeenCalledTimes(1);
+  });
+
+  test('pauses when the tab is hidden', () => {
+    const { controller } = renderOverlay(playing());
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+    } finally {
+      hidden.mockRestore();
+    }
+    expect(controller.pause).toHaveBeenCalledTimes(1);
+  });
+
+  test('does nothing while already paused', () => {
+    const { controller } = renderOverlay(buildState());
+    window.dispatchEvent(new Event('blur'));
+    expect(controller.pause).not.toHaveBeenCalled();
+  });
+});

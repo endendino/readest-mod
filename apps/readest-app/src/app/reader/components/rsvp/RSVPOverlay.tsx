@@ -505,10 +505,10 @@ const RSVPOverlay: React.FC<RSVPOverlayProps> = ({
     const onVisibility = () => {
       if (document.hidden) pauseIfPlaying();
     };
-    window.addEventListener('blur-sm', pauseIfPlaying);
+    window.addEventListener('blur', pauseIfPlaying);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      window.removeEventListener('blur-sm', pauseIfPlaying);
+      window.removeEventListener('blur', pauseIfPlaying);
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [controller]);

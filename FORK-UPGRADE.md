@@ -121,6 +121,11 @@ Upstream's codemods only run over upstream's files. When a release migrates a fr
 `v<ver>`, treat a line as fork-authored if it is absent from `git show v<ver>:<file>`, and rewrite class
 tokens inside string literals. Print every rename as a list and read it; the 0.12.8 pass produced two
 false positives (`!remoteDeleted.has(...)` and `!important` inside test strings) that had to be reverted.
+A third slipped through and shipped: `window.addEventListener('blur', …)` in `RSVPOverlay` became
+`'blur-sm'`, silently disabling RSVP's pause-on-focus-loss until 0.12.10. Any renamed token that
+stands alone in a string (event names, `===` comparisons, `includes(...)`) is suspect — only rename
+tokens inside `className`/`clsx`/`cn` arguments, and grep the result for
+`EventListener\(['"](blur|shadow|rounded|outline|grow|shrink)` before committing.
 The rename table used: `rounded→rounded-sm`, `rounded-sm→rounded-xs`, `shadow→shadow-sm`,
 `shadow-sm→shadow-xs`, `blur→blur-sm`, `outline-none→outline-hidden`, `flex-shrink-0→shrink-0`,
 `flex-grow→grow`, `!x→x!`, `label-text→text-sm`, `input-bordered`/`select-bordered` dropped.
