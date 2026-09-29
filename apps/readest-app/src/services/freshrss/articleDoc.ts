@@ -3,6 +3,8 @@ import type { AppService, FileSystem } from '@/types/system';
 import { htmlToBook } from '@/services/send/conversion/convertToEpub';
 import { bundleAssets } from '@/services/send/conversion/assetBundler';
 import { generateCoverSvg } from '@/services/send/conversion/coverGenerator';
+import { extractArticle, resolveArticleHtml } from '@/services/rss/feedArticleContent';
+import { guardedFetchText } from '@/services/rss/feedGuardedFetch';
 
 /**
  * Blank block appended after every article so the floating Done / Obsidian
@@ -64,6 +66,57 @@ export const withDeadline = async <T>(work: Promise<T>, ms: number, fallback: T)
   } finally {
     if (timer) clearTimeout(timer);
   }
+};
+
+/** How long recovering a teaser-only article's full text may hold up opening it. */
+const FULL_TEXT_TIMEOUT_MS = 8000;
+/** Recovered bodies kept for the session, so the open and the summary share one fetch. */
+const FULL_TEXT_CACHE_MAX = 50;
+const fullTextCache = new Map<string, Promise<string>>();
+
+export const clearFullTextCache = () => fullTextCache.clear();
+
+/** Extract the article from its page with upstream's Readability pass, minus the
+ *  `<h1>` it prepends — the masthead already carries the headline. */
+const fetchFullText = async (url: string): Promise<string> => {
+  const doc = new DOMParser().parseFromString(
+    extractArticle(await guardedFetchText(url), url),
+    'text/html',
+  );
+  doc.body.querySelector(':scope > h1')?.remove();
+  return doc.body.innerHTML;
+};
+
+/**
+ * The article body to read and summarize. Summary-only feeds give FreshRSS a
+ * teaser as the content; when upstream's RSS reader would consider that too
+ * thin (`resolveArticleHtml`, i.e. under MIN_FEED_CONTENT), fetch the page
+ * through upstream's guarded fetch and extract the article. Any failure — or a
+ * page slower than {@link FULL_TEXT_TIMEOUT_MS} — keeps the feed's own content,
+ * and only successes are cached, so the next open retries.
+ */
+export const resolveArticleBody = (article: FreshRSSArticle): Promise<string> => {
+  const own = article.contentHtml || '';
+  const item = { id: article.id, title: article.title, link: article.url, read: false };
+  if (!article.url || 'html' in resolveArticleHtml({ ...item, contentHtml: own })) {
+    return Promise.resolve(own);
+  }
+  const cached = fullTextCache.get(article.id);
+  if (cached) return cached;
+  const pending = withDeadline(
+    fetchFullText(article.url).catch(() => null),
+    FULL_TEXT_TIMEOUT_MS,
+    null,
+  ).then((full) => {
+    if (full?.trim()) return full;
+    fullTextCache.delete(article.id);
+    return own;
+  });
+  if (fullTextCache.size >= FULL_TEXT_CACHE_MAX) {
+    fullTextCache.delete(fullTextCache.keys().next().value!);
+  }
+  fullTextCache.set(article.id, pending);
+  return pending;
 };
 
 const escapeHtml = (s: string) =>
@@ -151,7 +204,7 @@ function buildMasthead(article: FreshRSSArticle, readMinutes: number): string {
  */
 export async function articleToFile(article: FreshRSSArticle): Promise<File> {
   const rawBody = stripReadingTimeWidget(
-    article.contentHtml?.trim() || `<p>${escapeHtml(article.title || '')}</p>`,
+    (await resolveArticleBody(article)).trim() || `<p>${escapeHtml(article.title || '')}</p>`,
   );
   const readMinutes = estimateReadMinutes(rawBody);
   // The trailing spacer is what actually keeps the floating Done/Obsidian

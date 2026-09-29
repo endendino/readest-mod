@@ -18,6 +18,7 @@ import { useOpenFeedArticle } from '../useOpenFeedArticle';
 import { useFeedShortcuts } from '../useFeedShortcuts';
 import type { CachedSummary, SummaryFormat } from '@/services/freshrss/summaryCache';
 import { FreshRSSClient } from '@/services/freshrss/greaderClient';
+import { resolveArticleBody } from '@/services/freshrss/articleDoc';
 import { eventDispatcher } from '@/utils/event';
 import type { FreshRSSArticle } from '@/types/freshrss';
 
@@ -189,7 +190,9 @@ const fetchSummary = async (
   const res = await fetch('/api/summarize', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: stripText(a.contentHtml), blurb: quickViewText(a) }),
+    // Teaser-only feeds are summarized from the recovered full article (shared
+    // with the reader's open, so it's one page fetch either way).
+    body: JSON.stringify({ text: stripText(await resolveArticleBody(a)), blurb: quickViewText(a) }),
   });
   const data = (await res.json().catch(() => null)) as {
     summary?: string;

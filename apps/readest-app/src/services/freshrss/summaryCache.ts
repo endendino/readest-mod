@@ -16,8 +16,10 @@
  * Bump when the summarizer's prompt or length bands change.
  * v2 — length-scaled summaries: full-article input (was truncated at 6k chars)
  *      plus word-count-banded prose/bullet targets.
+ * v3 — teaser-only feeds are summarized from the recovered full article, so
+ *      summaries cached from the teaser must not be served.
  */
-export const SUMMARY_PROMPT_VERSION = 2;
+export const SUMMARY_PROMPT_VERSION = 3;
 
 const STORAGE_KEY = 'readest_feed_summaries';
 /** Keep the most recent N summaries; older entries are pruned on write. */

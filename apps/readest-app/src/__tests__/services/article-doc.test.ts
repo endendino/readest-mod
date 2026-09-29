@@ -34,6 +34,13 @@ vi.mock('@/services/send/conversion/assetBundler', () => ({
 vi.mock('@/services/send/conversion/convertToEpub', () => ({
   htmlToBook: (...args: BookArgs) => htmlToBook(...args),
 }));
+// The fixtures' bodies are teaser-sized, which would send them down the
+// full-text path; that path has its own suite (article-full-text.test.ts).
+vi.mock('@/services/rss/feedGuardedFetch', () => ({
+  guardedFetchText: async () => {
+    throw new Error('no page fetch in masthead tests');
+  },
+}));
 vi.mock('@/services/send/conversion/coverGenerator', () => ({
   generateCoverSvg: (arg: unknown) => generateCoverSvg(arg as never),
 }));
