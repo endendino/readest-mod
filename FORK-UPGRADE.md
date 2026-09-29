@@ -20,6 +20,7 @@ and swaps the container.
 | 0.11.18 | 2026-07-08 | `git merge v0.11.18` | Paywall constant auto-merged to `true` (only its comment conflicted); foliate-js submodule kept the old pin |
 | 0.11.20 | 2026-07-21 | `git merge v0.11.20` | Upstream moved the transient-book filter to another file; WebDAV readiness refactored out from under its patch; foliate-js stale again → `fork-pins.test.ts` was written |
 | 0.12.8 | 2026-09-11 | `git merge v0.12.8` (443 upstream commits) | Tailwind 4/daisyUI 5 codemod did not reach fork-only files; assetBundler rewritten around the fork's proxy flag; `useRouter` dropped under the Feeds button; jsdom `StorageEvent` rejected the fork's localStorage shim; two "keep both" hunks cut inside a block |
+| 0.12.10 | 2026-09-29 | `git merge v0.12.10` (93 upstream commits) | No textual conflicts; 17 files changed on both sides auto-merged and were checked by hand. New `ABS_OFFLINE_REQUIRES_PREMIUM` paywall (unlocked by the image's `ENV SELF_HOSTED=true`). Local Docker (7.7 GB VM) now OOMs in `next build`'s TypeScript step → smoke-tested a native standalone build instead (see step 7) |
 
 Each pre-merge HEAD is tagged `pre-<version>-rollback`.
 
@@ -125,6 +126,26 @@ The rename table used: `rounded→rounded-sm`, `rounded-sm→rounded-xs`, `shado
 `flex-grow→grow`, `!x→x!`, `label-text→text-sm`, `input-bordered`/`select-bordered` dropped.
 
 ### 7. Build and run the real artifact
+
+Since 0.12.10 the image build needs more memory than a default Docker Desktop VM (≈8 GB) has: the
+build is killed (or takes the daemon down) during `next build`'s TypeScript step. CI's public-repo
+runner (16 GB) is unaffected. Locally, either raise Docker Desktop's memory to ≥12 GB, or run the same
+build natively and smoke-test the standalone server (the Dockerfile's extra steps — `sw.js`, fonts,
+`sharp` — are what that skips, so check them only when the Dockerfile changed):
+
+```bash
+cd apps/readest-app
+BUILD_STANDALONE=true NEXT_PUBLIC_APP_PLATFORM=web NEXT_PUBLIC_FRESHRSS_ENABLED=true \
+  NODE_OPTIONS=--max-old-space-size=6144 pnpm build-web
+cp -r .next/static .next/standalone/apps/readest-app/.next/ && cp -r public .next/standalone/apps/readest-app/
+SELF_HOSTED=true PORT=3100 node .next/standalone/apps/readest-app/server.js
+curl -s http://localhost:3100/runtime-config.js    # {"selfHosted":true} — every premium gate open
+```
+
+A `127.0.0.1:43117/pull` request "blocked by COEP" in the console is expected: it is the Obsidian
+clip-puller poke, `require-corp` only blocks reading the response, and the agent still receives it.
+
+With enough Docker memory, the image route below is still the reference:
 
 ```bash
 docker build --target production-stage \
