@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode, TouchEvent } from 'react';
 import clsx from 'clsx';
 import {
@@ -19,50 +19,9 @@ import { useFeedShortcuts } from '../useFeedShortcuts';
 import type { CachedSummary, SummaryFormat } from '@/services/freshrss/summaryCache';
 import { FreshRSSClient } from '@/services/freshrss/greaderClient';
 import { resolveArticleBody } from '@/services/freshrss/articleDoc';
+import { decodeEntities } from '@/services/freshrss/text';
 import { eventDispatcher } from '@/utils/event';
 import type { FreshRSSArticle } from '@/types/freshrss';
-
-// Named HTML entities that actually appear in feed text. The numeric branch of
-// `decodeEntities` covers every other codepoint, so this only needs the common
-// named ones (an unknown name passes through unchanged rather than breaking).
-const ENTITIES: Record<string, string> = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-  nbsp: ' ',
-  mdash: '—',
-  ndash: '–',
-  hellip: '…',
-  lsquo: '‘',
-  rsquo: '’',
-  ldquo: '“',
-  rdquo: '”',
-  laquo: '«',
-  raquo: '»',
-  copy: '©',
-  reg: '®',
-  trade: '™',
-  deg: '°',
-  euro: '€',
-  pound: '£',
-  times: '×',
-};
-
-/** Decode HTML character entities (`&quot;` → `"`, `&#39;` → `'`, `&#xE9;` → `é`)
- *  without a DOM/parser — pure string transform, cheap enough for the whole list. */
-const decodeEntities = (s: string): string =>
-  s.includes('&')
-    ? s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e: string) => {
-        if (e[0] === '#') {
-          const code =
-            e[1]!.toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-          return Number.isFinite(code) ? String.fromCodePoint(code) : m;
-        }
-        return ENTITIES[e.toLowerCase()] ?? m;
-      })
-    : s;
 
 // Strip real tags FIRST, then decode entities — so an encoded `&lt;b&gt;` becomes
 // visible text `<b>` rather than being mistaken for a tag (React escapes it on render).
@@ -370,7 +329,15 @@ const ArticleRow = memo(function ArticleRow({
                 view.dateStr,
               ]
                 .filter(Boolean)
-                .join(' · ')}
+                // Each segment is a bidi isolate: joined as one string, a
+                // Hebrew byline's Latin segments ("201 words", an English
+                // label) merged into one run and reordered the whole line.
+                .map((part, i) => (
+                  <Fragment key={i}>
+                    {i > 0 && ' · '}
+                    <bdi>{part}</bdi>
+                  </Fragment>
+                ))}
             </span>
           </button>
           <button

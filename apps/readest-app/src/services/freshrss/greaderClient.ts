@@ -1,4 +1,5 @@
 import type { FreshRSSFolder, FreshRSSFeed, FreshRSSArticle, FreshRSSPage } from '@/types/freshrss';
+import { decodeEntities } from './text';
 
 const READ_TAG = 'user/-/state/com.google/read';
 const labelOf = (streamId: string) => streamId.split('/').pop() ?? streamId;
@@ -14,7 +15,7 @@ export function parseSubscriptions(json: {
 }): FreshRSSFeed[] {
   return (json.subscriptions ?? []).map((s) => ({
     id: s.id,
-    title: s.title,
+    title: decodeEntities(s.title),
     folderId: s.categories?.[0]?.id ?? null,
     unreadCount: 0,
     iconUrl: s.iconUrl || undefined,
@@ -60,12 +61,15 @@ export function parseStreamContents(json: {
   const articles: FreshRSSArticle[] = (json.items ?? []).map((it) => ({
     id: it.id,
     feedId: it.origin?.streamId ?? '',
-    feedTitle: it.origin?.title ?? '',
+    // The GReader API returns plain-text fields HTML-escaped (`&quot;`); decode
+    // them once here so every consumer (list, masthead, Obsidian export) gets
+    // text. contentHtml/summaryHtml stay HTML.
+    feedTitle: decodeEntities(it.origin?.title ?? ''),
     categories: (it.categories ?? [])
       .filter((c) => c.includes('/label/'))
       .map((c) => c.slice(c.indexOf('/label/') + '/label/'.length)),
-    title: it.title ?? '(untitled)',
-    author: it.author || undefined,
+    title: decodeEntities(it.title ?? '(untitled)'),
+    author: decodeEntities(it.author ?? '') || undefined,
     url: it.canonical?.[0]?.href ?? it.alternate?.[0]?.href ?? '',
     publishedAt: (it.published ?? 0) * 1000,
     contentHtml: it.content?.content ?? it.summary?.content ?? '',

@@ -62,6 +62,37 @@ describe('greader parsers', () => {
     expect(folders[0]!.unreadCount).toBe(80);
   });
 
+  // FreshRSS's GReader API returns plain-text fields HTML-escaped; rendering
+  // them raw showed `&quot;` in Hebrew bylines (and the Latin "quot" then
+  // scrambled the whole line's bidi order).
+  it('parseStreamContents decodes entities in title, author and feed name', () => {
+    const [a] = parseStreamContents({
+      items: [
+        {
+          id: 'x',
+          title: 'צה&quot;ל &amp; מג&#34;ב',
+          author: 'מערכת &quot;זו הדרך&quot;',
+          origin: { streamId: 'feed/1', title: 'Ha&#39;aretz &amp; Co' },
+          content: { content: '<p>&quot;kept as HTML&quot;</p>' },
+        },
+      ],
+    }).articles;
+    expect(a).toMatchObject({
+      title: 'צה"ל & מג"ב',
+      author: 'מערכת "זו הדרך"',
+      feedTitle: "Ha'aretz & Co",
+      // HTML fields stay HTML — they are parsed, not shown as text.
+      contentHtml: '<p>&quot;kept as HTML&quot;</p>',
+    });
+  });
+
+  it('parseSubscriptions decodes entities in feed titles', () => {
+    const [f] = parseSubscriptions({
+      subscriptions: [{ id: 'feed/1', title: 'מערכת &quot;זו הדרך&quot;' }],
+    });
+    expect(f!.title).toBe('מערכת "זו הדרך"');
+  });
+
   it('parseStreamContents prefers content over summary and reads canonical url', () => {
     const page = parseStreamContents({
       continuation: 'CONT',

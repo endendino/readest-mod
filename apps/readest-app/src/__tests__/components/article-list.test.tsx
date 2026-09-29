@@ -81,6 +81,29 @@ describe('ArticleList — rendering', () => {
   });
 });
 
+describe('ArticleList — byline direction', () => {
+  // A Hebrew row's byline mixes Hebrew (author, feed) with Latin segments
+  // ("Hebrew" label, "201 words") and digits. Joined into one string, the
+  // bidi algorithm merged neighbouring Latin runs and reordered the line.
+  // Each segment is its own isolate, with the separators between them.
+  test('renders each byline segment as a bidi isolate', () => {
+    useFeedsStore.setState({
+      articles: [
+        {
+          ...article('h1', 'מתנחלים פשטו על הכפר', 'כתבה'),
+          author: 'מערכת "זו הדרך"',
+          categories: ['Hebrew'],
+        } as FreshRSSArticle,
+      ],
+    });
+    const { container } = render(<ArticleList />);
+    const segments = Array.from(container.querySelectorAll('bdi')).map((b) => b.textContent);
+    expect(segments).toContain('מערכת "זו הדרך"');
+    expect(segments).toContain('Hebrew');
+    expect(segments.some((t) => /words/.test(t ?? ''))).toBe(true);
+  });
+});
+
 describe('ArticleList — search (C2)', () => {
   test('/ opens the filter and narrows the queue', () => {
     render(<ArticleList />);
